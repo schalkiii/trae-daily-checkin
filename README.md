@@ -41,7 +41,7 @@ PowerShell 把带引号的路径当成字符串而不是命令。两种修法：
    & "C:\Users\qi.shao\AppData\Local\Programs\TRAE SOLO CN\TRAE SOLO CN.exe" --remote-debugging-port=9222
    ```
 3. 另开终端运行（**不要** `--force`）：`node src/auto-checkin.mjs`
-> 计划任务用 `--force --close` 一般没问题：因为 `--close` 会在签到后关掉 Trae，第二天触发时 Trae 没在跑，走的是"未运行直接带端口启动"分支，绕开了竞态。只有"Trae 当天正好开着"的首跑可能踩到。
+> 计划任务现在改为调用 `scheduled-run.bat`（见 6.4）：它先彻底关闭 Trae → 带 `--remote-debugging-port` 重新启动 → 轮询端口就绪 → 再运行签到脚本（**不带 `--force`**），从根上绕开了 Electron 单实例锁竞态。无论首跑还是日常，都不再出现"等待调试端口超时"。
 
 **3. 计划任务运行时提示找不到 node / 签到没执行**
 计划任务在非交互环境可能没有 Node 的 PATH。`install-schedule.bat` 已改为解析 node 的**绝对路径**写入任务命令，避免该问题。若仍失败，请确认 Node 已安装且 `where node` 能找到。
@@ -237,11 +237,10 @@ uninstall-schedule.bat
 脚本会自动用 `schtasks` 注册名为 `TraeDailyCheckin` 的任务，每天定时执行：
 
 ```
-node "项目目录\src\auto-checkin.mjs" --force --close
+scheduled-run.bat
 ```
 
-- `--force`：Trae 已在前台运行也能带端口重启
-- `--close`：签到完成后关闭 Trae，避免常驻占用资源
+`scheduled-run.bat` 内部流程：**先彻底关闭 Trae（含后台 `agent-tool-host.exe`）→ 带 `--remote-debugging-port` 重新启动 → 轮询端口就绪 → 运行 `node src\auto-checkin.mjs`（不带 `--force`）**。这样无论 Trae 当前是否在运行，都不会触发单实例锁竞态。签到后 Trae 保持打开（方便你继续使用）；如需签到后自动关闭 Trae，可在 `scheduled-run.bat` 末尾补一句 `taskkill /IM "TRAE SOLO CN.exe" /F`。
 
 **方式二：手动配置**
 
@@ -330,6 +329,7 @@ node src/auto-checkin.mjs --port 9223 --force --profile "D:\temp\trae-test-profi
 2. **调试端口的安全风险**：`--remote-debugging-port=9222` 只监听 `127.0.0.1`，本机安全；但任何本机进程都能连接，公用电脑不建议长期开启。
 3. **单实例限制**：Electron 单实例机制导致"带端口启动"在已有实例运行时不会生效，因此脚本在冲突时默认安全退出，并提供强制重启选项。
 4. **UI 弹窗/网络失败**：如果签到接口失败，按钮文本不会变成"今日已签"，脚本会返回 `unknown`，此时需要人工查看。
+5. **批处理文件编码**：所有 `.bat` 必须是「ASCII + CRLF（无 BOM）」。在中文 Windows（GBK 代码页）下，含中文的 `.bat` 即便写了 `chcp 65001` 也会被误解析（曾导致 `'rem' 不是内部或外部命令`、`'Trae' 不是内部或外部命令` 等报错）。需要中文提示时，请改用 `.ps1`（需带 UTF-8 BOM）或交给 PowerShell 输出；`.bat` 内只保留英文 `rem`/`echo`。
 
 ## 十、项目文件说明
 
@@ -338,8 +338,9 @@ trae-daily-checkin/
 ├── package.json                  # 项目元数据
 ├── README.md                     # 本文件
 ├── launch-with-debug.bat         # 双击启动 Trae（带调试端口，自动定位路径），并轮询确认端口就绪
-├── run-now.bat                   # 一键签到：带端口重启 Trae -> 等待端口 -> 运行签到
-├── install-schedule.bat          # 一键注册"每日自动签到"任务计划
+├── run-now.bat                   # 一键签到：关闭 Trae 后带端口重启 -> 等待端口 -> 运行签到（手动双击用，含 pause）
+├── scheduled-run.bat             # 非交互版一键签到：供 Windows 任务计划调用（无 pause，避免挂起）
+├── install-schedule.bat          # 一键注册"每日自动签到"任务计划（指向 scheduled-run.bat）
 ├── uninstall-schedule.bat        # 删除"每日自动签到"任务计划
 ├── scripts/
 │   ├── locate-trae.ps1           # 通用定位 Trae 路径（进程/注册表/常见目录，可单独调用）

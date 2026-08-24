@@ -1,23 +1,23 @@
 # scripts/locate-trae.ps1
-# 定位 Trae 可执行文件路径（仅供其它脚本调用，不执行任何启动/关闭操作）
-# 用法：
+# Locate the Trae executable path (helper only; does not launch or close anything)
+# Usage:
 #   powershell -ExecutionPolicy Bypass -File scripts\locate-trae.ps1
 #   powershell -ExecutionPolicy Bypass -File scripts\locate-trae.ps1 -ExePath "D:\My\TRAE SOLO CN\TRAE SOLO CN.exe"
-# 优先级：参数 -ExePath > 环境变量 TRAECHECKIN_EXE > 正在运行的进程 > 注册表 > 常见安装目录
+# Priority: -ExePath param > TRAECHECKIN_EXE env > running process > registry > common install dirs
 param(
   [string]$ExePath = ''
 )
 
 if ($ExePath) {
   if (Test-Path -LiteralPath $ExePath) { Write-Output (Resolve-Path -LiteralPath $ExePath).Path; exit 0 }
-  Write-Error "指定路径不存在：$ExePath"; exit 1
+  Write-Error "Specified path does not exist: $ExePath"; exit 1
 }
 if ($env:TRAECHECKIN_EXE) {
   if (Test-Path -LiteralPath $env:TRAECHECKIN_EXE) { Write-Output (Resolve-Path -LiteralPath $env:TRAECHECKIN_EXE).Path; exit 0 }
-  Write-Error "环境变量 TRAECHECKIN_EXE 指定的路径不存在：$($env:TRAECHECKIN_EXE)"; exit 1
+  Write-Error "TRAECHECKIN_EXE env path does not exist: $($env:TRAECHECKIN_EXE)"; exit 1
 }
 
-# 1) 正在运行的 Trae 主进程（只匹配文件名以 TRAE 开头的 exe，避免误匹配 browser-bridge 等）
+# 1) Running Trae main process (match exe names starting with TRAE, avoid browser-bridge etc.)
 $proc = Get-CimInstance Win32_Process |
   Where-Object {
     $_.ExecutablePath -and
@@ -27,11 +27,11 @@ $proc = Get-CimInstance Win32_Process |
   Select-Object -First 1 -ExpandProperty ExecutablePath
 if ($proc) {
   Write-Output $proc
-  Write-Verbose "[INFO] 从正在运行的进程定位到 Trae: $proc"
+  Write-Verbose "[INFO] Located Trae from running process: $proc"
   exit 0
 }
 
-# 2) 注册表卸载项里的 InstallLocation
+# 2) Registry uninstall entries' InstallLocation
 $roots = @(
   'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
   'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall',
@@ -47,7 +47,7 @@ foreach ($r in $roots) {
             $candidate = Join-Path $v.InstallLocation $n
             if (Test-Path -LiteralPath $candidate) {
               Write-Output $candidate
-              Write-Verbose "[INFO] 从注册表定位到 Trae: $candidate"
+              Write-Verbose "[INFO] Located Trae from registry: $candidate"
               exit 0
             }
           }
@@ -57,7 +57,7 @@ foreach ($r in $roots) {
   }
 }
 
-# 3) 常见安装目录（有限深度扫描）
+# 3) Common install directories (limited-depth scan)
 $bases = @(
   'C:\Program Files', 'C:\Program Files (x86)',
   "$env:LOCALAPPDATA\Programs",
@@ -70,10 +70,10 @@ foreach ($base in $bases) {
     Select-Object -First 1
   if ($found) {
     Write-Output $found.FullName
-    Write-Verbose "[INFO] 自动扫描到 Trae: $($found.FullName)"
+    Write-Verbose "[INFO] Auto-scanned Trae: $($found.FullName)"
     exit 0
   }
 }
 
-Write-Error "未找到 Trae 可执行文件。请通过 -ExePath 或环境变量 TRAECHECKIN_EXE 指定。"
+Write-Error "Trae executable not found. Specify via -ExePath or TRAECHECKIN_EXE env var."
 exit 1
