@@ -8,10 +8,8 @@ set "TASK_NAME=TraeDailyCheckin"
 
 schtasks /Delete /TN "%TASK_NAME%" /F >nul 2>nul
 if errorlevel 1 (
-  echo [ERROR] 任务删除失败（可能不存在）。
-  pause >nul
-  exit /b 1
+  echo [INFO] 任务 %TASK_NAME% 不存在或已删除。
+) else (
+  echo [OK] 已删除任务：%TASK_NAME%
 )
-
-echo [OK] 已删除任务：%TASK_NAME%
 pause >nul

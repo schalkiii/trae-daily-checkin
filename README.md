@@ -2,6 +2,56 @@
 
 > 从"这是个套壳 Web 吗？"到"自动点击签到"的完整实现记录。
 
+> 本项目 fork 维护于 https://github.com/schalkiii/trae-daily-checkin（原作 BlueChonk/trae-daily-checkin）。
+
+## 快速开始
+
+```bat
+:: 1) 一键启动 Trae 并开放调试端口（自动定位，双击也行）
+launch-with-debug.bat
+
+:: 2) 另开终端，运行签到（端口已开，无需 --force）
+node src/auto-checkin.mjs
+
+:: 3)（可选）注册每天定时自动签到，例如每天 12:00
+install-schedule.bat 12:00
+
+:: 不想配置计划任务？每天手动点一下也行：
+run-now.bat
+```
+
+> 如果 Trae 已经在运行但没开端口，直接 `node src/auto-checkin.mjs --force` 可能遇到 Electron 单实例锁竞态而超时（见下方"常见问题"第 2 条）。最稳的做法：先彻底关闭 Trae → 用 `launch-with-debug.bat` 带端口启动一次 → 再不带 `--force` 运行脚本。
+
+## 常见问题与踩坑（Troubleshooting）
+
+**1. 在 PowerShell 里直接贴 `"C:\...\TRAE SOLO CN.exe" --remote-debugging-port=9222` 报 `Unexpected token`**
+PowerShell 把带引号的路径当成字符串而不是命令。两种修法：
+- 加调用运算符 `&`：`& "C:\Users\...\TRAE SOLO CN\TRAE SOLO CN.exe" --remote-debugging-port=9222`
+- 或者直接**双击 `launch-with-debug.bat`**（内部用 `start` 已处理引号）。
+
+**2. `node src/auto-checkin.mjs --force` 报"等待调试端口超时"**
+这是 Electron 单实例锁（SingletonLock）竞态：脚本先杀掉旧 Trae，再立刻带端口启动新实例，但锁文件尚未释放，新实例把 `--remote-debugging-port` 转交给（已死的）旧实例后自己退出，导致没有进程真正绑定端口。
+标准解法（绕过竞态）：
+1. 彻底关闭 Trae（含后台 `agent-tool-host.exe`）：
+   ```powershell
+   Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -like '*TRAE SOLO CN*' -or $_.Name -eq 'agent-tool-host.exe' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+   ```
+2. 用正确语法带端口启动一次（保持运行）：
+   ```powershell
+   & "C:\Users\qi.shao\AppData\Local\Programs\TRAE SOLO CN\TRAE SOLO CN.exe" --remote-debugging-port=9222
+   ```
+3. 另开终端运行（**不要** `--force`）：`node src/auto-checkin.mjs`
+> 计划任务用 `--force --close` 一般没问题：因为 `--close` 会在签到后关掉 Trae，第二天触发时 Trae 没在跑，走的是"未运行直接带端口启动"分支，绕开了竞态。只有"Trae 当天正好开着"的首跑可能踩到。
+
+**3. 计划任务运行时提示找不到 node / 签到没执行**
+计划任务在非交互环境可能没有 Node 的 PATH。`install-schedule.bat` 已改为解析 node 的**绝对路径**写入任务命令，避免该问题。若仍失败，请确认 Node 已安装且 `where node` 能找到。
+
+**4. 退出码 2 / status=already_signed 是正常**
+表示"今日已签"，不是错误，无需重试。
+
+**5. 签到后积分没变 / status=unknown**
+说明点击后按钮文字没变成"今日已签"，通常是网络或接口失败，需人工到 Trae 里看一眼。
+
 ## 一、需求与想法
 
 Trae SOLO CN（字节跳动面向中文用户的 AI IDE）每天点击左下角头像会弹出一个账户菜单，其中有一项：
@@ -144,13 +194,19 @@ node src/auto-checkin.mjs --help
 ### 6.2 首次/手动运行
 
 ```bat
-:: 方法 A：双击 launch-with-debug.bat 启动 Trae（已带调试端口，自动定位 Trae）
-:: 方法 B：如果 Trae 已经在运行但无端口，用 PowerShell 强制重启（自动定位）
-powershell -ExecutionPolicy Bypass -File scripts\relaunch-with-debug.ps1
+:: 方法 A（推荐，一步到位）：run-now.bat 会先带端口重启 Trae，再自动签到
+run-now.bat
 
-:: 运行签到脚本（同样会解析并定位 Trae 路径）
+:: 方法 B：双击 launch-with-debug.bat 启动 Trae（已带调试端口，自动定位）
+::         然后另开终端运行签到脚本
+node src/auto-checkin.mjs
+
+:: 方法 C：如果 Trae 已经在运行但无端口，用 PowerShell 强制重启（自动定位）
+powershell -ExecutionPolicy Bypass -File scripts\relaunch-with-debug.ps1
 node src/auto-checkin.mjs
 ```
+
+> 方法 A/B 在 Trae 未运行或已正确带端口时最稳；若遇到"等待调试端口超时"，见顶部"常见问题"第 2 条。
 
 ### 6.3 如何定位 Trae（自定义路径 + 自动扫描）
 
@@ -281,7 +337,8 @@ node src/auto-checkin.mjs --port 9223 --force --profile "D:\temp\trae-test-profi
 trae-daily-checkin/
 ├── package.json                  # 项目元数据
 ├── README.md                     # 本文件
-├── launch-with-debug.bat         # 双击启动 Trae（带调试端口，自动定位路径）
+├── launch-with-debug.bat         # 双击启动 Trae（带调试端口，自动定位路径），并轮询确认端口就绪
+├── run-now.bat                   # 一键签到：带端口重启 Trae -> 等待端口 -> 运行签到
 ├── install-schedule.bat          # 一键注册"每日自动签到"任务计划
 ├── uninstall-schedule.bat        # 删除"每日自动签到"任务计划
 ├── scripts/
