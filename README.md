@@ -178,6 +178,9 @@ node src/auto-checkin.mjs --dir "C:\Program Files\TRAE SOLO CN\TRAE SOLO CN.exe"
 :: 签到完成后自动关闭 Trae（适合无人值守/任务计划场景）
 node src/auto-checkin.mjs --force --close
 
+::: 签到结果推送到飞书群机器人（webhook 也可用环境变量 TRAECHECKIN_FEISHU_WEBHOOK）
+node src/auto-checkin.mjs --feishu "https://open.feishu.cn/open-apis/bot/v2/hook/xxxxxxxx"
+
 :: 查看全部参数说明
 node src/auto-checkin.mjs --help
 ```
@@ -191,8 +194,9 @@ node src/auto-checkin.mjs --help
 | `--force` | 已运行但无调试端口时强制重启（也可 `--force 1`） | 关 |
 | `--profile <path>` | 使用独立 user-data-dir（profile）启动，用于隔离测试 | 默认账号 |
 | `--close` | 签到完成后关闭 Trae 进程（适合无人值守） | 关 |
+| `--feishu <url>` | 签到结果推送飞书群机器人 webhook | 不推送 |
 
-> 兼容旧用法：以上参数均有对应环境变量 `TRAECHECKIN_EXE` / `TRAECHECKIN_PORT` / `TRAECHECKIN_FORCE_RELAUNCH` / `TRAECHECKIN_USER_DATA_DIR` / `TRAECHECKIN_CLOSE`，但**命令行参数优先级更高**。实际优先级：`命令行参数 > 环境变量 > 自动扫描定位`。
+> 兼容旧用法：以上参数均有对应环境变量 `TRAECHECKIN_EXE` / `TRAECHECKIN_PORT` / `TRAECHECKIN_FORCE_RELAUNCH` / `TRAECHECKIN_USER_DATA_DIR` / `TRAECHECKIN_CLOSE` / `TRAECHECKIN_FEISHU_WEBHOOK`，但**命令行参数优先级更高**。实际优先级：`命令行参数 > 环境变量 > 自动扫描定位`。
 
 ### 6.2 首次/手动运行
 
@@ -253,6 +257,18 @@ scheduled-run.bat
 3. 建议签到时间设为开机后或午休时间，并勾选"无论用户是否登录都要运行"（需要保存密码）。
 
 > 如果希望签到后 Trae 保持打开（正常使用时），命令去掉 `--close` 即可。
+
+### 6.5 签到结果飞书推送（可选）
+
+给飞书群机器人推送每日签到结果，方便手机查看。
+
+1. 在飞书里创建一个群 → 群设置 → 群机器人 → 添加"自定义机器人"，复制 webhook 地址（形如 `https://open.feishu.cn/open-apis/bot/v2/hook/xxxx`）。当前版本仅支持**未开启"签名校验"**的 webhook。
+2. 两种配置方式（命令行参数优先级更高）：
+   - 命令行：`node src/auto-checkin.mjs --feishu "https://open.feishu.cn/open-apis/bot/v2/hook/xxxx"`
+   - 环境变量：`setx TRAECHECKIN_FEISHU_WEBHOOK "https://open.feishu.cn/open-apis/bot/v2/hook/xxxx"`。设置后 `run-once.bat` / `scheduled-run.bat` 无需改动即可自动推送（计划任务以用户身份运行时同样生效）。
+3. 每次签到结束后，脚本向 webhook 发送一条文本消息，内容包含：状态、详情、时间。
+
+> 说明：推送失败只会在终端输出 `[WARN] 飞书通知发送失败`，**不影响签到本身的退出码**；未配置 webhook 时跳过推送。
 
 ## 七、退出码说明
 
@@ -319,7 +335,7 @@ Electron 默认单实例：如果 Trae 已在运行，再带端口启动新实�
 
 ```bat
 :: 指定独立 profile + 独立端口，并强制重启到新实例（未登录）
-node src/auto-checkin.mjs --port 9223 --force --profile "D:\temp\trae-test-profile"
+node src/auto-checkin.mjs --port 9223 --force --profile "C:\Windows\Temp\trae-test-profile"
 ```
 
 首次运行会用独立 profile 打开一个全新窗口，需**手动登录一次**（该登录态只保存在这个独立 profile 里，不影响主账号）。之后再运行脚本即可完成真实签到。验证过程中，主账号（9222 端口）全程不受影响。

@@ -19,6 +19,7 @@ import path from 'node:path';
 //      --force                已运行但无调试端口时强制重启 Trae（也可 --force 1）
 //      --profile <path>       使用独立 user-data-dir（profile）启动，隔离测试用
 //      --close                签到完成后关闭 Trae 进程
+//      --feishu <url>         签到结果推送飞书群机器人 webhook（也可用环境变量）
 //      -h, --help             显示帮助
 // -------------------------------------------------------------
 function parseOptions() {
@@ -34,6 +35,7 @@ function parseOptions() {
     force: argv.includes('--force') || argValue('force') === '1' || process.env.TRAECHECKIN_FORCE_RELAUNCH === '1',
     profile: argValue('profile') || argValue('user-data-dir') || process.env.TRAECHECKIN_USER_DATA_DIR?.trim() || '',
     close: argv.includes('--close') || argValue('close') === '1' || process.env.TRAECHECKIN_CLOSE === '1',
+    feishu: argValue('feishu') || argValue('feishu-webhook') || process.env.TRAECHECKIN_FEISHU_WEBHOOK?.trim() || '',
   };
 }
 
@@ -49,13 +51,15 @@ if (OPTS.help) {
   --force                已运行但无调试端口时强制重启 Trae（也可 --force 1）
   --profile <path>       使用独立 user-data-dir（profile）启动，隔离测试用
   --close                签到完成后关闭 Trae 进程
+  --feishu <url>         签到结果推送飞书群机器人 webhook（也可用 TRAECHECKIN_FEISHU_WEBHOOK）
   -h, --help             显示帮助
 
 示例：
   node src/auto-checkin.mjs
   node src/auto-checkin.mjs --port 9223 --force
-  node src/auto-checkin.mjs --dir "D:\\Tools\\TRAE SOLO CN\\TRAE SOLO CN.exe" --port 9223 --profile "D:\\temp\\trae-test-profile"
+  node src/auto-checkin.mjs --dir "C:\\Program Files\\TRAE SOLO CN\\TRAE SOLO CN.exe" --port 9223 --profile "C:\\Windows\\Temp\\trae-test-profile"
   node src/auto-checkin.mjs --port 9223 --force --close
+  node src/auto-checkin.mjs --feishu "https://open.feishu.cn/open-apis/bot/v2/hook/xxxx"
 
 优先级说明：命令行参数 > 环境变量 > 自动扫描定位。
 `);
@@ -505,6 +509,46 @@ async function performCheckIn(cdp) {
 }
 
 // -------------------------------------------------------------
+// 3.5 飞书群机器人 webhook 推送（可选）
+//     配置方式：--feishu <url> 或环境变量 TRAECHECKIN_FEISHU_WEBHOOK
+//     推送失败仅告警，不影响签到退出码
+// -------------------------------------------------------------
+async function notifyFeishu(result) {
+  const webhook = OPTS.feishu;
+  if (!webhook) return;
+
+  const statusMap = {
+    success: '签到成功',
+    already_signed: '今日已签',
+    not_logged_in: '账户未登录',
+    click_failed: '点击按钮失败',
+    unknown: '结果未知',
+  };
+  const text = [
+    '【Trae 每日签到】',
+    `状态：${statusMap[result.status] || result.status}`,
+    `详情：${result.detail || '-'}`,
+    `时间：${new Date().toLocaleString('zh-CN', { hour12: false })}`,
+  ].join('\n');
+
+  try {
+    const res = await fetch(webhook, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ msg_type: 'text', content: { text } }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    const body = await res.text();
+    let codeOk = false;
+    try { codeOk = JSON.parse(body).code === 0; } catch { /* 非 JSON 响应 */ }
+    if (!res.ok || !codeOk) throw new Error(`HTTP ${res.status}: ${body.slice(0, 200)}`);
+    console.log('[INFO] 飞书通知已发送');
+  } catch (err) {
+    console.error('[WARN] 飞书通知发送失败:', err.message);
+  }
+}
+
+// -------------------------------------------------------------
 // 4. 主流程
 // -------------------------------------------------------------
 async function main() {
@@ -517,6 +561,9 @@ async function main() {
     await sleep(300); // 等 WebSocket 句柄释放后再退出
 
     console.log('[RESULT]', JSON.stringify(result, null, 2));
+
+    // 签到结果推送到飞书（可选，配置了 webhook 才发送）
+    await notifyFeishu(result);
 
     // 签到完成（无论成功/已签/失败）后，可选关闭 Trae 进程
     if (CLOSE_AFTER_CHECKIN) {
