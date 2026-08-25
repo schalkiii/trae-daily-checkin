@@ -17,10 +17,10 @@ node src/auto-checkin.mjs
 install-schedule.bat 12:00
 
 :: 不想配置计划任务？每天手动点一下也行：
-run-now.bat
+run-once.bat
 ```
 
-> 如果 Trae 已经在运行但没开端口，直接 `node src/auto-checkin.mjs --force` 可能遇到 Electron 单实例锁竞态而超时（见下方"常见问题"第 2 条）。`launch-with-debug.bat` 与 `run-now.bat` 均已内置"先关闭已运行的 Trae 再带端口启动"，因此无需手动关闭。
+> 如果 Trae 已经在运行但没开端口，直接 `node src/auto-checkin.mjs --force` 可能遇到 Electron 单实例锁竞态而超时（见下方"常见问题"第 2 条）。`launch-with-debug.bat` 与 `run-once.bat` 均已内置"先关闭已运行的 Trae 再带端口启动"，因此无需手动关闭。
 
 ## 常见问题与踩坑（Troubleshooting）
 
@@ -52,7 +52,7 @@ PowerShell 把带引号的路径当成字符串而不是命令。两种修法：
 **5. 签到后积分没变 / status=unknown**
 说明点击后按钮文字没变成"今日已签"，通常是网络或接口失败，需人工到 Trae 里看一眼。
 
-**6. `run-now.bat` / 带端口重启后报"未找到每日签到按钮"**
+**6. `run-once.bat` / 带端口重启后报"未找到每日签到按钮"**
 刚重启的 Trae 主窗口可能还没渲染完成，或 CDP 连到了启动页/后台页。脚本已增强：连接时会逐个探测并优先选择"已渲染出左下角头像"的页面（即主窗口），随后等待主窗口 DOM 就绪（最长约 15 秒）。若仍失败，请查看日志中的 `CDP page:` 诊断行与报错里的页面标题/内容，确认连到的确实是主窗口。
 
 ## 一、需求与想法
@@ -197,8 +197,8 @@ node src/auto-checkin.mjs --help
 ### 6.2 首次/手动运行
 
 ```bat
-:: 方法 A（推荐，一步到位）：run-now.bat 会先带端口重启 Trae，再自动签到
-run-now.bat
+:: 方法 A（推荐，一步到位）：run-once.bat 会先带端口重启 Trae，再自动签到
+run-once.bat
 
 :: 方法 B：双击 launch-with-debug.bat 启动 Trae（自动关闭已运行实例，再带调试端口启动，自动定位）
 ::         然后另开终端运行签到脚本
@@ -341,7 +341,7 @@ trae-daily-checkin/
 ├── package.json                  # 项目元数据
 ├── README.md                     # 本文件
 ├── launch-with-debug.bat         # 双击启动 Trae：先关闭已运行实例，再带调试端口启动（自动定位），并轮询确认端口就绪
-├── run-now.bat                   # 一键签到：关闭 Trae 后带端口重启 -> 等待端口 -> 运行签到（手动双击用，含 pause）
+├── run-once.bat                   # 一键签到：关闭 Trae 后带端口重启 -> 等待端口 -> 运行签到（手动双击用，含 pause）
 ├── scheduled-run.bat             # 非交互版一键签到：供 Windows 任务计划调用（无 pause，避免挂起）
 ├── install-schedule.bat          # 一键注册"每日自动签到"任务计划（指向 scheduled-run.bat）
 ├── uninstall-schedule.bat        # 删除"每日自动签到"任务计划
