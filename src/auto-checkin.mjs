@@ -2,10 +2,16 @@
 // 通过 Chrome DevTools Protocol (CDP) 自动完成 Trae SOLO CN 每日签到。
 // 零第三方依赖：Node >= 18 自带的 fetch / WebSocket。
 
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const ROOT = path.dirname(__dirname); // project root (parent of src/)
 
 // -------------------------------------------------------------
 // 0. 解析命令行参数（优先）与环境变量（回退）
@@ -22,7 +28,20 @@ import path from 'node:path';
 //      --feishu <url>         签到结果推送飞书群机器人 webhook（也可用环境变量）
 //      -h, --help             显示帮助
 // -------------------------------------------------------------
+function loadConfig() {
+  // config.json lives at project root; TRAECHECKIN_CONFIG overrides the path.
+  // Precedence (highest first): CLI arg > env var > config.json > built-in default.
+  const p = process.env.TRAECHECKIN_CONFIG || path.join(ROOT, 'config.json');
+  try {
+    const data = JSON.parse(fs.readFileSync(p, 'utf8'));
+    return data && typeof data === 'object' ? data : {};
+  } catch {
+    return {};
+  }
+}
+
 function parseOptions() {
+  const cfg = loadConfig();
   const argv = process.argv.slice(2);
   const argValue = (name) => {
     const i = argv.indexOf(`--${name}`);
@@ -30,12 +49,13 @@ function parseOptions() {
   };
   return {
     help: argv.includes('--help') || argv.includes('-h'),
-    exe: argValue('exe') || argValue('dir') || process.env.TRAECHECKIN_EXE?.trim() || '',
-    port: Number(argValue('port') || process.env.TRAECHECKIN_PORT || 9222),
-    force: argv.includes('--force') || argValue('force') === '1' || process.env.TRAECHECKIN_FORCE_RELAUNCH === '1',
-    profile: argValue('profile') || argValue('user-data-dir') || process.env.TRAECHECKIN_USER_DATA_DIR?.trim() || '',
-    close: argv.includes('--close') || argValue('close') === '1' || process.env.TRAECHECKIN_CLOSE === '1',
-    feishu: argValue('feishu') || argValue('feishu-webhook') || process.env.TRAECHECKIN_FEISHU_WEBHOOK?.trim() || '',
+    exe: argValue('exe') || argValue('dir') || process.env.TRAECHECKIN_EXE?.trim() || cfg.traeExe || '',
+    port: Number(argValue('port') || process.env.TRAECHECKIN_PORT || cfg.port || 9222),
+    force: argv.includes('--force') || argValue('force') === '1' || process.env.TRAECHECKIN_FORCE_RELAUNCH === '1' || !!cfg.forceRelaunch,
+    profile: argValue('profile') || argValue('user-data-dir') || process.env.TRAECHECKIN_USER_DATA_DIR?.trim() || cfg.userDataDir || '',
+    close: argv.includes('--close') || argValue('close') === '1' || process.env.TRAECHECKIN_CLOSE === '1' || !!cfg.closeAfter,
+    feishu: argValue('feishu') || argValue('feishu-webhook') || process.env.TRAECHECKIN_FEISHU_WEBHOOK?.trim() || cfg.feishuWebhook || '',
+    noPush: argv.includes('--no-push') || process.env.TRAECHECKIN_NO_PUSH === '1' || !!cfg.noPush,
   };
 }
 
@@ -51,7 +71,8 @@ if (OPTS.help) {
   --force                已运行但无调试端口时强制重启 Trae（也可 --force 1）
   --profile <path>       使用独立 user-data-dir（profile）启动，隔离测试用
   --close                签到完成后关闭 Trae 进程
-  --feishu <url>         签到结果推送飞书群机器人 webhook（也可用 TRAECHECKIN_FEISHU_WEBHOOK）
+  --feishu <url>         签到结果推送飞书群机器人 webhook（也可: 环境变量 TRAECHECKIN_FEISHU_WEBHOOK / config.json feishuWebhook）
+  --no-push              只签到、不推送飞书（测试用）
   -h, --help             显示帮助
 
 示例：
@@ -61,7 +82,7 @@ if (OPTS.help) {
   node src/auto-checkin.mjs --port 9223 --force --close
   node src/auto-checkin.mjs --feishu "https://open.feishu.cn/open-apis/bot/v2/hook/xxxx"
 
-优先级说明：命令行参数 > 环境变量 > 自动扫描定位。
+优先级说明：命令行参数 > 环境变量 > config.json > 自动扫描定位。
 `);
   process.exit(0);
 }
@@ -515,7 +536,7 @@ async function performCheckIn(cdp) {
 // -------------------------------------------------------------
 async function notifyFeishu(result) {
   const webhook = OPTS.feishu;
-  if (!webhook) return;
+  if (!webhook || OPTS.noPush) return;
 
   const statusMap = {
     success: '签到成功',
@@ -530,19 +551,40 @@ async function notifyFeishu(result) {
     `详情：${result.detail || '-'}`,
     `时间：${new Date().toLocaleString('zh-CN', { hour12: false })}`,
   ].join('\n');
+  const body = JSON.stringify({ msg_type: 'text', content: { text } });
 
+  // 1) curl 主通道：本环境经实战验证可用（走 HTTP(S)_PROXY；--ssl-no-revoke 规避
+  //    Windows schannel 证书吊销离线握手失败）。Node fetch 在 mihomo 代理下可能直连被拦截。
+  try {
+    const tmp = path.join(os.tmpdir(), 'trae_feishu_' + Date.now() + '.json');
+    fs.writeFileSync(tmp, body, 'utf8');
+    const curlArgs = ['-sS', '-H', 'Content-Type: application/json', '-d', '@' + tmp, webhook];
+    if (process.platform === 'win32') curlArgs.unshift('--ssl-no-revoke');
+    const r = spawnSync('curl', curlArgs, { encoding: 'utf8', timeout: 20000 });
+    try { fs.rmSync(tmp, { force: true }); } catch { /* ignore */ }
+    const out = (r.stdout || '').trim();
+    let codeOk = r.status === 0;
+    try { codeOk = codeOk && /"code"\s*:\s*0/.test(out); } catch { /* ignore */ }
+    if (!codeOk) throw new Error('curl HTTP ' + (r.status || '?') + ': ' + out.slice(0, 200));
+    console.log('[INFO] 飞书通知已发送 (curl)');
+    return;
+  } catch (e) {
+    console.warn('[WARN] curl 推送失败 (' + e.message + ')，尝试 Node fetch 兜底...');
+  }
+
+  // 2) fetch 兜底
   try {
     const res = await fetch(webhook, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ msg_type: 'text', content: { text } }),
+      body,
       signal: AbortSignal.timeout(10_000),
     });
-    const body = await res.text();
-    let codeOk = false;
-    try { codeOk = JSON.parse(body).code === 0; } catch { /* 非 JSON 响应 */ }
-    if (!res.ok || !codeOk) throw new Error(`HTTP ${res.status}: ${body.slice(0, 200)}`);
-    console.log('[INFO] 飞书通知已发送');
+    const rb = await res.text();
+    let codeOk = res.ok;
+    try { codeOk = codeOk && JSON.parse(rb).code === 0; } catch { /* 非 JSON 响应 */ }
+    if (!codeOk) throw new Error(`HTTP ${res.status}: ${rb.slice(0, 200)}`);
+    console.log('[INFO] 飞书通知已发送 (fetch)');
   } catch (err) {
     console.error('[WARN] 飞书通知发送失败:', err.message);
   }

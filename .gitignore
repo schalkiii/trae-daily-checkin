@@ -4,3 +4,5 @@ node_modules/
 .idea/
 .vscode/
 .codebuddy/
+# Local config with private webhook (keep out of git; see config.example.json)
+config.json

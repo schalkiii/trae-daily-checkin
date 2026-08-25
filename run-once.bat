@@ -1,9 +1,13 @@
 @echo off
 chcp 65001 >nul
 rem ============================================================
-rem One-click check-in: close Trae -> launch with debug port -> wait -> sign in
-rem Suitable for manual testing, or a daily manual run instead of Task Scheduler.
-rem NOTE: closes the current Trae window (unsaved work may be lost); save first.
+rem One-click check-in (test run): close Trae -> launch with debug
+rem port -> wait -> sign in. Suitable for manual testing instead of
+rem Task Scheduler. NOTE: closes the current Trae window (unsaved
+rem work may be lost); save first. Runs with --no-push so you can
+rem test without duplicate Feishu notifications; for a real push use
+rem scheduled-run.bat (or drop --no-push and set the webhook via
+rem config.json feishuWebhook / TRAECHECKIN_FEISHU_WEBHOOK).
 rem ============================================================
 
 set "PROJECT_DIR=%~dp0"
@@ -36,7 +40,7 @@ if errorlevel 1 (
   exit /b 1
 )
 
-rem 4) Run check-in (port is open, no --force needed)
-echo [INFO] Running check-in ...
-node "%PROJECT_DIR%src\auto-checkin.mjs"
+rem 4) Run check-in (port is open, no --force needed); --no-push = test run
+echo [INFO] Running check-in (no-push test) ...
+node "%PROJECT_DIR%src\auto-checkin.mjs" --no-push
 pause >nul

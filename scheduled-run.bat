@@ -5,6 +5,8 @@ rem Non-interactive check-in runner for Task Scheduler.
 rem Closes Trae, relaunches with the debug port, waits, then
 rem runs the check-in script (no --force, avoids the electron
 rem singleton-lock race). No pause; safe for scheduled runs.
+rem The Feishu webhook is read by auto-checkin.mjs from config.json
+rem (or TRAECHECKIN_FEISHU_WEBHOOK env); not hardcoded here.
 rem ============================================================
 
 set "PROJECT_DIR=%~dp0"

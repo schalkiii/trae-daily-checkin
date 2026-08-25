@@ -194,9 +194,10 @@ node src/auto-checkin.mjs --help
 | `--force` | 已运行但无调试端口时强制重启（也可 `--force 1`） | 关 |
 | `--profile <path>` | 使用独立 user-data-dir（profile）启动，用于隔离测试 | 默认账号 |
 | `--close` | 签到完成后关闭 Trae 进程（适合无人值守） | 关 |
-| `--feishu <url>` | 签到结果推送飞书群机器人 webhook | 不推送 |
+| `--feishu <url>` | 签到结果推送飞书群机器人 webhook（也可 config.json / 环境变量） | 不推送 |
+| `--no-push` | 只签到、不推送飞书（测试用，run-once.bat 默认带此参数） | 关 |
 
-> 兼容旧用法：以上参数均有对应环境变量 `TRAECHECKIN_EXE` / `TRAECHECKIN_PORT` / `TRAECHECKIN_FORCE_RELAUNCH` / `TRAECHECKIN_USER_DATA_DIR` / `TRAECHECKIN_CLOSE` / `TRAECHECKIN_FEISHU_WEBHOOK`，但**命令行参数优先级更高**。实际优先级：`命令行参数 > 环境变量 > 自动扫描定位`。
+> 兼容旧用法：以上参数均有对应环境变量 `TRAECHECKIN_EXE` / `TRAECHECKIN_PORT` / `TRAECHECKIN_FORCE_RELAUNCH` / `TRAECHECKIN_USER_DATA_DIR` / `TRAECHECKIN_CLOSE` / `TRAECHECKIN_FEISHU_WEBHOOK`，但**命令行参数优先级更高**。实际优先级：`命令行参数 > 环境变量 > config.json > 自动扫描定位`。
 
 ### 6.2 首次/手动运行
 
@@ -249,6 +250,8 @@ scheduled-run.bat
 
 `scheduled-run.bat` 内部流程：**先彻底关闭 Trae（含后台 `agent-tool-host.exe`）→ 带 `--remote-debugging-port` 重新启动 → 轮询端口就绪 → 运行 `node src\auto-checkin.mjs`（不带 `--force`）**。这样无论 Trae 当前是否在运行，都不会触发单实例锁竞态。签到后 Trae 保持打开（方便你继续使用）；如需签到后自动关闭 Trae，可在 `scheduled-run.bat` 末尾补一句 `taskkill /IM "TRAE SOLO CN.exe" /F`。
 
+> `scheduled-run.bat` 调用 `auto-checkin.mjs` 完成签到；如配置了飞书 webhook（`config.json` 的 `feishuWebhook` 或环境变量 `TRAECHECKIN_FEISHU_WEBHOOK`），计划任务每次签到结束后会自动把结果（状态/详情/时间）推送到指定飞书群。`run-once.bat` 以 `--no-push` 运行，仅测试、不推送。webhook 不再硬编码在 `.bat` 中。
+
 **方式二：手动配置**
 
 1. 打开"任务计划程序" → 创建基本任务，每天固定时间触发。
@@ -263,9 +266,11 @@ scheduled-run.bat
 给飞书群机器人推送每日签到结果，方便手机查看。
 
 1. 在飞书里创建一个群 → 群设置 → 群机器人 → 添加"自定义机器人"，复制 webhook 地址（形如 `https://open.feishu.cn/open-apis/bot/v2/hook/xxxx`）。当前版本仅支持**未开启"签名校验"**的 webhook。
-2. 两种配置方式（命令行参数优先级更高）：
-   - 命令行：`node src/auto-checkin.mjs --feishu "https://open.feishu.cn/open-apis/bot/v2/hook/xxxx"`
-   - 环境变量：`setx TRAECHECKIN_FEISHU_WEBHOOK "https://open.feishu.cn/open-apis/bot/v2/hook/xxxx"`。设置后 `run-once.bat` / `scheduled-run.bat` 无需改动即可自动推送（计划任务以用户身份运行时同样生效）。
+2. 三种配置方式（`config.json` / 环境变量 / 命令行，优先级：命令行 > 环境变量 > config.json）：
+   - config.json（推荐，且不会进版本库）：在项目根目录创建 `config.json`，填入 `"feishuWebhook": "https://open.feishu.cn/open/apis/bot/v2/hook/xxxx"`（模板见 `config.example.json`）。
+   - 环境变量：`setx TRAECHECKIN_FEISHU_WEBHOOK "https://open.feishu.cn/open/apis/bot/v2/hook/xxxx"`。
+   - 命令行：`node src/auto-checkin.mjs --feishu "https://open.feishu.cn/open/apis/bot/v2/hook/xxxx"`。
+   注意：`run-once.bat` 以 `--no-push` 运行（仅测试）；`scheduled-run.bat` 不传 `--no-push`，配置 webhook 后会自动推送。
 3. 每次签到结束后，脚本向 webhook 发送一条文本消息，内容包含：状态、详情、时间。
 
 > 说明：推送失败只会在终端输出 `[WARN] 飞书通知发送失败`，**不影响签到本身的退出码**；未配置 webhook 时跳过推送。
