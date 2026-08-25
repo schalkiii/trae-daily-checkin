@@ -310,20 +310,8 @@ async function waitForPort(timeoutMs) {
 // -------------------------------------------------------------
 // 2. CDP 连接工具
 // -------------------------------------------------------------
-async function connectCDP() {
-  const res = await fetch(WS_URL);
-  const targets = await res.json();
-  const pageTarget = targets.find(t => t.type === 'page');
-  if (!pageTarget) {
-    throw new Error('未找到 page 类型的 CDP target');
-  }
-
-  const ws = new WebSocket(pageTarget.webSocketDebuggerUrl);
-  await new Promise((resolve, reject) => {
-    ws.addEventListener('open', resolve);
-    ws.addEventListener('error', reject);
-  });
-
+// 基于一个已建立的 WebSocket 生成 send / evaluate 客户端
+function makeCdpClient(ws) {
   let id = 0;
   const pending = new Map();
   ws.addEventListener('message', ev => {
@@ -340,8 +328,59 @@ async function connectCDP() {
     ws.send(JSON.stringify({ id: myId, method, params: params || {} }));
   });
 
-  await send('Runtime.enable');
-  return { ws, send, evaluate: expr => send('Runtime.evaluate', { expression: expr, returnByValue: true }) };
+  return {
+    ws,
+    send,
+    evaluate: expr => send('Runtime.evaluate', { expression: expr, returnByValue: true }),
+  };
+}
+
+async function connectPage(wsUrl) {
+  const ws = new WebSocket(wsUrl);
+  await new Promise((resolve, reject) => {
+    ws.addEventListener('open', resolve);
+    ws.addEventListener('error', reject);
+  });
+  const cdp = makeCdpClient(ws);
+  await cdp.send('Runtime.enable');
+  return cdp;
+}
+
+async function connectCDP() {
+  const res = await fetch(WS_URL);
+  const targets = await res.json();
+  const pages = targets.filter(t => t.type === 'page');
+  if (!pages.length) {
+    throw new Error('未找到 page 类型的 CDP target');
+  }
+  for (const t of pages) {
+    console.log(`[INFO] CDP page: ${t.title || '(无标题)'} | ${t.url || ''}`);
+  }
+
+  // 逐个探测，优先连接"已渲染出左下角头像"的页面（即 Trae 主窗口）。
+  // 刚带端口重启的 Trae 可能存在启动页/后台页，直接取第一个 page 会连错页面。
+  for (const t of pages) {
+    let cdp;
+    try {
+      cdp = await connectPage(t.webSocketDebuggerUrl);
+    } catch {
+      continue;
+    }
+    try {
+      const r = await cdp.evaluate(`!!document.querySelector('[class*="accountTrigger"]')`);
+      if (r?.result?.result?.value) {
+        console.log(`[INFO] 已定位到 Trae 主窗口: ${t.title}`);
+        return cdp;
+      }
+    } catch {
+      // 页面可能仍在加载中，探测失败则尝试下一个
+    }
+    try { cdp.ws.close(); } catch { /* 忽略 */ }
+  }
+
+  // 兜底：连接第一个 page，若界面尚未渲染完成，由后续"等待主窗口就绪"处理
+  console.log('[INFO] 未探测到已就绪的主窗口，先连接第一个 page，等待其渲染...');
+  return connectPage(pages[0].webSocketDebuggerUrl);
 }
 
 // -------------------------------------------------------------
@@ -349,6 +388,27 @@ async function connectCDP() {
 // -------------------------------------------------------------
 async function performCheckIn(cdp) {
   const { evaluate } = cdp;
+
+  // 3.0 等待主窗口 DOM 就绪：Trae 刚带端口重启时界面可能仍在加载，
+  //     左下角头像（accountTrigger）出现后才说明主界面已渲染完成
+  let triggerReady = false;
+  for (let i = 0; i < 30; i++) {
+    const probe = await evaluate(`!!document.querySelector('[class*="accountTrigger"]')`);
+    if (probe.result.result.value) { triggerReady = true; break; }
+    await sleep(500);
+  }
+  if (!triggerReady) {
+    const diag = await evaluate(`(() => ({
+      title: document.title || '',
+      url: location.href || '',
+      hasTrigger: !!document.querySelector('[class*="accountTrigger"]'),
+      bodySample: document.body ? document.body.innerText.replace(/\\s+/g, ' ').slice(0, 120) : ''
+    }))()`);
+    throw new Error(
+      '等待 Trae 主窗口就绪超时（界面未加载完成，或连到了非主窗口页面）: ' +
+      JSON.stringify(diag.result.result.value)
+    );
+  }
 
   // 3.1 打开账户菜单（状态感知：如果已经打开就不再点）
   const menuAlreadyOpen = await evaluate(`!!document.querySelector('[class*="accountPopover"]')`);
