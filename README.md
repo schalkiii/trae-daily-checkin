@@ -248,7 +248,7 @@ uninstall-schedule.bat
 scheduled-run.bat
 ```
 
-`scheduled-run.bat` 内部流程：**先彻底关闭 Trae（含后台 `agent-tool-host.exe`）→ 带 `--remote-debugging-port` 重新启动 → 轮询端口就绪 → 运行 `node src\auto-checkin.mjs`（不带 `--force`）**。这样无论 Trae 当前是否在运行，都不会触发单实例锁竞态。签到后 Trae 保持打开（方便你继续使用）；如需签到后自动关闭 Trae，可在 `scheduled-run.bat` 末尾补一句 `taskkill /IM "TRAE SOLO CN.exe" /F`。
+`scheduled-run.bat` 内部流程：**先彻底关闭 Trae（含后台 `agent-tool-host.exe`）→ 带 `--remote-debugging-port` 重新启动 → 轮询端口就绪 → 运行 `node src\auto-checkin.mjs --close`（不带 `--force`）**。这样无论 Trae 当前是否在运行，都不会触发单实例锁竞态。**签到完成后 `auto-checkin.mjs` 会自动关闭 Trae 进程（含后台 `agent-tool-host.exe`），不会持续占用**；如需签到后保留 Trae（例如手动调试），把 `--close` 去掉即可，或用 `run-once.bat`（测试模式默认不关闭）。
 
 > `scheduled-run.bat` 调用 `auto-checkin.mjs` 完成签到；如配置了飞书 webhook（`config.json` 的 `feishuWebhook` 或环境变量 `TRAECHECKIN_FEISHU_WEBHOOK`），计划任务每次签到结束后会自动把结果（状态/详情/时间）推送到指定飞书群。`run-once.bat` 以 `--no-push` 运行，仅测试、不推送。webhook 不再硬编码在 `.bat` 中。
 
