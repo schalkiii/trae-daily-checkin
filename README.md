@@ -267,9 +267,9 @@ scheduled-run.bat
 
 1. 在飞书里创建一个群 → 群设置 → 群机器人 → 添加"自定义机器人"，复制 webhook 地址（形如 `https://open.feishu.cn/open-apis/bot/v2/hook/xxxx`）。当前版本仅支持**未开启"签名校验"**的 webhook。
 2. 三种配置方式（`config.json` / 环境变量 / 命令行，优先级：命令行 > 环境变量 > config.json）：
-   - config.json（推荐，且不会进版本库）：在项目根目录创建 `config.json`，填入 `"feishuWebhook": "https://open.feishu.cn/open/apis/bot/v2/hook/xxxx"`（模板见 `config.example.json`）。
-   - 环境变量：`setx TRAECHECKIN_FEISHU_WEBHOOK "https://open.feishu.cn/open/apis/bot/v2/hook/xxxx"`。
-   - 命令行：`node src/auto-checkin.mjs --feishu "https://open.feishu.cn/open/apis/bot/v2/hook/xxxx"`。
+   - config.json（推荐，且不会进版本库）：在项目根目录创建 `config.json`，填入 `"feishuWebhook": "https://open.feishu.cn/open-apis/bot/v2/hook/xxxx"`（模板见 `config.example.json`）。
+   - 环境变量：`setx TRAECHECKIN_FEISHU_WEBHOOK "https://open.feishu.cn/open-apis/bot/v2/hook/xxxx"`。
+   - 命令行：`node src/auto-checkin.mjs --feishu "https://open.feishu.cn/open-apis/bot/v2/hook/xxxx"`。
    注意：`run-once.bat` 以 `--no-push` 运行（仅测试）；`scheduled-run.bat` 不传 `--no-push`，配置 webhook 后会自动推送。
 3. 每次签到结束后，脚本向 webhook 发送一条文本消息，内容包含：状态、详情、时间。
 
