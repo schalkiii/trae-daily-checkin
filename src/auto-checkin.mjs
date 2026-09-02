@@ -397,6 +397,15 @@ const DOM_HELPERS_SRC = `
       }
       return fuzzy.length ? fuzzy[0] : null;
     },
+    // 返回命中策略，便于诊断：是 class 前缀命中，还是文本语义兜底
+    checkinStrategy: function(){
+      var byClass = find('[class*="accountCheckinButton"]') || find('[class*="AccountCheckinButton"]')
+             || find('[class*="checkinButton"]') || find('[class*="CheckinButton"]');
+      if (byClass) return { via: 'class', text: (byClass.textContent||'').trim() };
+      var b = window.__TRAEFIND.checkinButton();
+      if (b) return { via: 'text', text: window.__TRAEFIND.checkinText() };
+      return { via: 'none', text: '' };
+    },
     checkinText: function(){
       var label = find('[class*="accountCheckinButtonLabel"]') || find('[class*="AccountCheckinButtonLabel"]');
       if (label) return (label.textContent||'').trim();
@@ -553,6 +562,14 @@ async function performCheckIn(cdp) {
   })()`);
   const state = inspect.result.result.value;
   console.log(`[INFO] 签到按钮状态: ${JSON.stringify(state)}`);
+  // 自检：报告命中策略，便于判断是类名前缀变化还是文本兜底生效
+  const strat = await evaluate(`window.__TRAEFIND.checkinStrategy()`);
+  const sv = strat.result.result.value || { via: 'unknown' };
+  console.log(
+    `[INFO] 定位策略: ${sv.via}` +
+    (sv.via === 'text' ? '（class 前缀未命中，文本语义兜底生效，疑似类名已变化）'
+      : sv.via === 'class' ? '（class 前缀命中，类名未变）' : '')
+  );
 
   if (state.error) {
     // 区分"未登录"与"类名已变化"：检查账户菜单里是否出现登录入口
