@@ -333,6 +333,95 @@ async function waitForPort(timeoutMs) {
 }
 
 // -------------------------------------------------------------
+// 1.5 页面端 DOM 定位辅助（多重候选，抗类名变化）
+//     原脚本仅依赖固定 class 前缀（accountCheckin* 等），Trae
+//     更新导致 CSS 类名前缀变化时会定位失败。改为"class 前缀 ->
+//     文本语义"多重候选，并支持账户菜单 HTML 诊断，最大化兼容。
+// -------------------------------------------------------------
+const DOM_HELPERS_SRC = `
+(function(){
+  if (window.__TRAEFIND) return;
+  function find(sel){ return document.querySelector(sel); }
+  window.__TRAEFIND = {
+    trigger: function(){
+      var el = find('[class*="accountTrigger"]') || find('[class*="AccountTrigger"]');
+      if (el) return el;
+      var btns = document.querySelectorAll('button, [role="button"], a');
+      for (var i=0;i<btns.length;i++){
+        if (/用户|账户|头像/.test(btns[i].textContent||'')) return btns[i];
+      }
+      return null;
+    },
+    menu: function(){
+      var el = find('[class*="accountPopover"]') || find('[class*="accountCard"]')
+            || find('[class*="AccountPopover"]') || find('[class*="AccountCard"]');
+      if (el) return el;
+      var nodes = document.querySelectorAll('*');
+      for (var i=0;i<nodes.length;i++){
+        if (/每日签到领[0-9]+积分/.test(nodes[i].textContent||'')){
+          var p = nodes[i];
+          for (var k=0;k<4 && p;k++){
+            if (p.className && /popover|card|menu|overlay|panel/i.test(String(p.className))) return p;
+            p = p.parentElement;
+          }
+          return nodes[i].parentElement || nodes[i];
+        }
+      }
+      return null;
+    },
+    menuText: function(){ var m = window.__TRAEFIND.menu(); return m ? (m.textContent||'') : ''; },
+    menuHtml: function(){
+      var m = window.__TRAEFIND.menu();
+      var h = m ? m.outerHTML : (document.body ? document.body.innerHTML : '');
+      return (h||'').slice(0, 3000);
+    },
+    checkinButton: function(){
+      var el = find('[class*="accountCheckinButton"]') || find('[class*="AccountCheckinButton"]')
+             || find('[class*="checkinButton"]') || find('[class*="CheckinButton"]');
+      if (el) return el;
+      var scope = window.__TRAEFIND.menu() || document;
+      var nodes = scope.querySelectorAll('button, [role="button"], a, div, span');
+      var exact = [];
+      for (var i=0;i<nodes.length;i++){
+        var t = (nodes[i].textContent||'').trim();
+        if (t==='签到' || t==='今日已签' || t==='去签到' || t==='立即签到' || t==='已签到') exact.push(nodes[i]);
+      }
+      if (exact.length) return exact[0];
+      var fuzzy = [];
+      var all = scope.querySelectorAll('*');
+      for (var j=0;j<all.length;j++){
+        var e = all[j];
+        if (e.children.length!==0) continue;
+        var tx = (e.textContent||'').trim();
+        if (/签到/.test(tx) && !/每日签到领/.test(tx)) fuzzy.push(e);
+      }
+      return fuzzy.length ? fuzzy[0] : null;
+    },
+    checkinText: function(){
+      var label = find('[class*="accountCheckinButtonLabel"]') || find('[class*="AccountCheckinButtonLabel"]');
+      if (label) return (label.textContent||'').trim();
+      var b = window.__TRAEFIND.checkinButton();
+      return b ? (b.textContent||'').trim() : '';
+    },
+    checkinTitle: function(){
+      var t = find('[class*="accountCheckinTitle"]') || find('[class*="AccountCheckinTitle"]');
+      if (t) return (t.textContent||'').trim();
+      var nodes = document.querySelectorAll('*');
+      for (var i=0;i<nodes.length;i++){
+        if (/每日签到领[0-9]+积分/.test(nodes[i].textContent||'')) return (nodes[i].textContent||'').trim();
+      }
+      return '';
+    }
+  };
+})();
+`;
+
+async function injectDomHelpers(cdp) {
+  // 幂等：页面内已存在则跳过；注入多候选定位辅助，避免类名变化后失效
+  await cdp.evaluate(DOM_HELPERS_SRC);
+}
+
+// -------------------------------------------------------------
 // 2. CDP 连接工具
 // -------------------------------------------------------------
 // 基于一个已建立的 WebSocket 生成 send / evaluate 客户端
@@ -368,6 +457,7 @@ async function connectPage(wsUrl) {
   });
   const cdp = makeCdpClient(ws);
   await cdp.send('Runtime.enable');
+  await injectDomHelpers(cdp); // 注入多候选定位辅助，抗 CSS 类名变化
   return cdp;
 }
 
@@ -392,7 +482,8 @@ async function connectCDP() {
       continue;
     }
     try {
-      const r = await cdp.evaluate(`!!document.querySelector('[class*="accountTrigger"]')`);
+      await injectDomHelpers(cdp);
+      const r = await cdp.evaluate(`!!window.__TRAEFIND.trigger()`);
       if (r?.result?.result?.value) {
         console.log(`[INFO] 已定位到 Trae 主窗口: ${t.title}`);
         return cdp;
@@ -413,12 +504,13 @@ async function connectCDP() {
 // -------------------------------------------------------------
 async function performCheckIn(cdp) {
   const { evaluate } = cdp;
+  await injectDomHelpers(cdp); // 确保多候选定位辅助已注入（抗类名变化）
 
   // 3.0 等待主窗口 DOM 就绪：Trae 刚带端口重启时界面可能仍在加载，
   //     左下角头像（accountTrigger）出现后才说明主界面已渲染完成
   let triggerReady = false;
   for (let i = 0; i < 30; i++) {
-    const probe = await evaluate(`!!document.querySelector('[class*="accountTrigger"]')`);
+    const probe = await evaluate(`!!window.__TRAEFIND.trigger()`);
     if (probe.result.result.value) { triggerReady = true; break; }
     await sleep(500);
   }
@@ -426,7 +518,7 @@ async function performCheckIn(cdp) {
     const diag = await evaluate(`(() => ({
       title: document.title || '',
       url: location.href || '',
-      hasTrigger: !!document.querySelector('[class*="accountTrigger"]'),
+      hasTrigger: !!window.__TRAEFIND.trigger(),
       bodySample: document.body ? document.body.innerText.replace(/\\s+/g, ' ').slice(0, 120) : ''
     }))()`);
     throw new Error(
@@ -436,20 +528,14 @@ async function performCheckIn(cdp) {
   }
 
   // 3.1 打开账户菜单（状态感知：如果已经打开就不再点）
-  const menuAlreadyOpen = await evaluate(`!!document.querySelector('[class*="accountPopover"]')`);
+  const menuAlreadyOpen = await evaluate(`!!window.__TRAEFIND.menu()`);
   if (!menuAlreadyOpen.result.result.value) {
     console.log('[INFO] 点击左下角头像...');
-    await evaluate(`
-      (() => {
-        const el = document.querySelector('[class*="accountTrigger"]');
-        if (el) { el.click(); return true; }
-        return false;
-      })()
-    `);
+    await evaluate(`window.__TRAEFIND.trigger() && window.__TRAEFIND.trigger().click()`);
     // 菜单渲染可能需要时间，轮询等待最多 5 秒
     for (let i = 0; i < 10; i++) {
       await sleep(500);
-      const open = await evaluate(`!!document.querySelector('[class*="accountPopover"]')`);
+      const open = await evaluate(`!!window.__TRAEFIND.menu()`);
       if (open.result.result.value) break;
     }
   } else {
@@ -457,39 +543,36 @@ async function performCheckIn(cdp) {
   }
 
   // 3.2 读取签到按钮当前状态
-  const inspect = await evaluate(`
-    (() => {
-      const btn = document.querySelector('[class*="accountCheckinButton"]');
-      const label = document.querySelector('[class*="accountCheckinButtonLabel"]');
-      if (!btn) return { error: 'checkin_button_not_found' };
-      return {
-        buttonText: label ? (label.textContent || '').trim() : (btn.textContent || '').trim(),
-        title: (document.querySelector('[class*="accountCheckinTitle"]')?.textContent || '').trim()
-      };
-    })()
-  `);
+  const inspect = await evaluate(`(() => {
+    const btn = window.__TRAEFIND.checkinButton();
+    if (!btn) return { error: 'checkin_button_not_found' };
+    return {
+      buttonText: window.__TRAEFIND.checkinText(),
+      title: window.__TRAEFIND.checkinTitle()
+    };
+  })()`);
   const state = inspect.result.result.value;
   console.log(`[INFO] 签到按钮状态: ${JSON.stringify(state)}`);
 
   if (state.error) {
     // 区分"未登录"与"类名已变化"：检查账户菜单里是否出现登录入口
-    const loginHint = await evaluate(`
-      (() => {
-        const menu = document.querySelector('[class*="accountPopover"]');
-        if (!menu) return { menuOpen: false };
-        const t = (menu.textContent || '');
-        return {
-          menuOpen: true,
-          hasLogin: /登录|扫码|立即登录|手机号/.test(t),
-          sample: t.replace(/\\s+/g, ' ').slice(0, 80)
-        };
-      })()
-    `);
-    const hint = loginHint.result.result.value;
+    const diag = await evaluate(`(() => {
+      const menu = window.__TRAEFIND.menu();
+      const t = window.__TRAEFIND.menuText();
+      return {
+        menuOpen: !!menu,
+        hasLogin: /登录|扫码|立即登录|手机号/.test(t),
+        sample: t.replace(/\\s+/g, ' ').slice(0, 120),
+        html: window.__TRAEFIND.menuHtml()
+      };
+    })()`);
+    const hint = diag.result.result.value;
     if (hint.menuOpen && hint.hasLogin) {
       return { status: 'not_logged_in', detail: hint.sample };
     }
-    throw new Error('未找到每日签到按钮，可能类名已变化');
+    // 类名/结构变化导致定位失败时，打印账户菜单 HTML 片段便于排查
+    console.error('[DIAG] 账户菜单诊断（前 3000 字符）：\\n' + (hint.html || '(无菜单容器)'));
+    throw new Error('未找到每日签到按钮（class 前缀与文本语义均匹配失败，可能 UI 结构已变化）');
   }
 
   if (/已签/.test(state.buttonText)) {
@@ -498,14 +581,12 @@ async function performCheckIn(cdp) {
 
   // 3.3 点击签到按钮
   console.log('[INFO] 尝试点击签到按钮...');
-  const clicked = await evaluate(`
-    (() => {
-      const btn = document.querySelector('[class*="accountCheckinButton"]');
-      if (!btn) return false;
-      btn.click();
-      return true;
-    })()
-  `);
+  const clicked = await evaluate(`(() => {
+    const btn = window.__TRAEFIND.checkinButton();
+    if (!btn) return false;
+    btn.click();
+    return true;
+  })()`);
 
   if (!clicked.result.result.value) {
     return { status: 'click_failed' };
@@ -514,13 +595,9 @@ async function performCheckIn(cdp) {
   await sleep(2000);
 
   // 3.4 验证：按钮文字是否变成"今日已签"
-  const verify = await evaluate(`
-    (() => {
-      const label = document.querySelector('[class*="accountCheckinButtonLabel"]');
-      const btn = document.querySelector('[class*="accountCheckinButton"]');
-      return label ? (label.textContent || '').trim() : (btn ? (btn.textContent || '').trim() : 'button_gone');
-    })()
-  `);
+  const verify = await evaluate(`(() => {
+    return window.__TRAEFIND.checkinText() || 'button_gone';
+  })()`);
 
   const afterText = verify.result.result.value;
   if (/已签/.test(afterText)) {

@@ -131,7 +131,7 @@ http://localhost:9222/json
 | 签到按钮 | 类名前缀 `accountCheckinButton` |
 | 签到按钮文字 | 类名前缀 `accountCheckinButtonLabel` |
 
-由于 CSS 类名是工具生成的哈希后缀（如 `accountCheckinButton-hoMtQt`），脚本里使用 `*[class*="accountCheckinButton"]` 这种前缀匹配，比完全固定类名更抗更新。
+由于 CSS 类名是工具生成的哈希后缀（如 `accountCheckinButton-hoMtQt`），早期版本仅用 `*[class*="accountCheckinButton"]` 前缀匹配，仍可能在 Trae 大版本更新后失效。现升级为 **多候选定位**：先按 class 前缀匹配，匹配不到再按 **文本语义** 兜底——在账户菜单内查找"签到/今日已签"按钮、按"每日签到领 200 积分"标题回溯源容器。即使类名前缀整体变化，只要菜单文字稳定即可正常签到；若仍失败，脚本会打印 `[DIAG]` 账户菜单 HTML 片段，便于反馈排查。
 
 ## 五、核心脚本设计
 
@@ -349,7 +349,7 @@ node src/auto-checkin.mjs --port 9223 --force --profile "C:\Windows\Temp\trae-te
 
 ## 九、已知限制与注意事项
 
-1. **CSS 类名可能随更新变化**：脚本使用 `class*="前缀"` 匹配，但仍需在 Trae 更新后抽查一次。
+1. **CSS 类名可能随更新变化**：脚本已采用"class 前缀 + 文本语义（签到/今日已签/每日签到领…）"多重候选定位，比单纯前缀匹配更抗更新。若 Trae 改版导致定位仍失败，脚本会输出 `[DIAG] 账户菜单诊断` 日志，请将其反馈以便进一步适配，而无需每次手动核对类名。
 2. **调试端口的安全风险**：`--remote-debugging-port=9222` 只监听 `127.0.0.1`，本机安全；但任何本机进程都能连接，公用电脑不建议长期开启。
 3. **单实例限制**：Electron 单实例机制导致"带端口启动"在已有实例运行时不会生效，因此脚本在冲突时默认安全退出，并提供强制重启选项。
 4. **UI 弹窗/网络失败**：如果签到接口失败，按钮文本不会变成"今日已签"，脚本会返回 `unknown`，此时需要人工查看。
