@@ -471,11 +471,32 @@ async function connectPage(wsUrl) {
 }
 
 async function connectCDP() {
-  const res = await fetch(WS_URL);
-  const targets = await res.json();
-  const pages = targets.filter(t => t.type === 'page');
+  // Trae 刚带端口启动时，/json/version 已响应但主窗口 page 可能尚未创建，
+  // 此时 /json 返回的 target 列表为空。定时任务属冷启动必现此竞态，
+  // 因此轮询等待 page 出现，而非一次性查询后立即报错。
+  const PAGE_WAIT_MS = 30_000;
+  const deadline = Date.now() + PAGE_WAIT_MS;
+  let pages = [];
+  let notified = false;
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(WS_URL);
+      const targets = await res.json();
+      pages = targets.filter(t => t.type === 'page');
+      if (pages.length) break;
+    } catch {
+      // Trae 启动/切换实例期间端口可能短暂不可达，忽略单次失败继续重试
+    }
+    if (!notified) {
+      console.log('[INFO] Trae 主窗口尚未创建，等待 page target 就绪...');
+      notified = true;
+    }
+    await sleep(1000);
+  }
   if (!pages.length) {
-    throw new Error('未找到 page 类型的 CDP target');
+    throw new Error(
+      `等待 ${PAGE_WAIT_MS / 1000} 秒后仍未找到 page 类型的 CDP target（Trae 可能启动失败或被安全软件拦截）`
+    );
   }
   for (const t of pages) {
     console.log(`[INFO] CDP page: ${t.title || '(无标题)'} | ${t.url || ''}`);
@@ -511,6 +532,39 @@ async function connectCDP() {
 // -------------------------------------------------------------
 // 3. DOM 操作：打开头像菜单、检测并点击签到
 // -------------------------------------------------------------
+// 用 CDP Input.dispatchMouseEvent 派发真实鼠标事件（trusted）点击签到按钮。
+// DOM 的 element.click() 产生的是 untrusted 合成事件，Trae 前端框架不响应，
+// 实测表现是"点击后按钮文字仍为签到"，签到请求并未真正提交。
+async function clickCheckinButton(cdp) {
+  const { evaluate, send } = cdp;
+
+  // 先滚动到视口内，保证后续坐标落在可见区域
+  await evaluate(`(() => {
+    const btn = window.__TRAEFIND.checkinButton();
+    if (btn && btn.scrollIntoView) btn.scrollIntoView({ block: 'center', inline: 'center' });
+    return true;
+  })()`);
+  await sleep(300);
+
+  const rect = await evaluate(`(() => {
+    const btn = window.__TRAEFIND.checkinButton();
+    if (!btn) return null;
+    const r = btn.getBoundingClientRect();
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2, w: r.width, h: r.height };
+  })()`);
+  const box = rect?.result?.result?.value;
+  if (!box || !box.w || !box.h) return false;
+
+  const dispatch = (type, buttons) => send('Input.dispatchMouseEvent', {
+    type, x: box.x, y: box.y, button: 'left', buttons, clickCount: 1,
+  });
+  await dispatch('mouseMoved', 0);
+  await dispatch('mousePressed', 1);
+  await sleep(60);
+  await dispatch('mouseReleased', 0);
+  return true;
+}
+
 async function performCheckIn(cdp) {
   const { evaluate } = cdp;
   await injectDomHelpers(cdp); // 确保多候选定位辅助已注入（抗类名变化）
@@ -596,29 +650,24 @@ async function performCheckIn(cdp) {
     return { status: 'already_signed', detail: state.buttonText };
   }
 
-  // 3.3 点击签到按钮
+  // 3.3 点击签到按钮（真实鼠标事件，见 clickCheckinButton 说明）
   console.log('[INFO] 尝试点击签到按钮...');
-  const clicked = await evaluate(`(() => {
-    const btn = window.__TRAEFIND.checkinButton();
-    if (!btn) return false;
-    btn.click();
-    return true;
-  })()`);
+  const clicked = await clickCheckinButton(cdp);
 
-  if (!clicked.result.result.value) {
+  if (!clicked) {
     return { status: 'click_failed' };
   }
 
-  await sleep(2000);
-
-  // 3.4 验证：按钮文字是否变成"今日已签"
-  const verify = await evaluate(`(() => {
-    return window.__TRAEFIND.checkinText() || 'button_gone';
-  })()`);
-
-  const afterText = verify.result.result.value;
-  if (/已签/.test(afterText)) {
-    return { status: 'success', detail: afterText };
+  // 3.4 验证：轮询等待按钮文字变成"今日已签"。
+  //     签到是网络请求，耗时不定，固定等待会误判为 unknown。
+  let afterText = '';
+  for (let i = 0; i < 20; i++) {
+    await sleep(500);
+    const verify = await evaluate(`window.__TRAEFIND.checkinText() || 'button_gone'`);
+    afterText = verify.result.result.value;
+    if (/已签/.test(afterText)) {
+      return { status: 'success', detail: afterText };
+    }
   }
   return { status: 'unknown', detail: afterText };
 }

@@ -52,7 +52,16 @@ PowerShell 把带引号的路径当成字符串而不是命令。两种修法：
 **5. 签到后积分没变 / status=unknown**
 说明点击后按钮文字没变成"今日已签"，通常是网络或接口失败，需人工到 Trae 里看一眼。
 
-**6. `run-once.bat` / 带端口重启后报"未找到每日签到按钮"**
+**6. 报 `未找到 page 类型的 CDP target` / `fetch failed`（定时任务冷启动常见）**
+调试端口就绪（`/json/version` 返回 200）只代表 CDP 端点可用，**不代表 Trae 主窗口已创建**。刚启动时 `/json` 的 page 列表为空，直接查询就会报此错。脚本已修复为轮询等待主窗口 page 出现（最长 30 秒）。若仍失败，查看 `logs\checkin.log` 中的 `CDP page:` 诊断行。
+
+**7. 端口曾就绪但随后 `fetch failed`（Electron 单实例锁竞态）**
+关闭 Trae 后若进程尚未完全退出，Electron 的 SingletonLock 仍被占用，新实例会把 `--remote-debugging-port` 转交给已退出的旧实例后自身退出，导致无人绑定端口。`close-trae.ps1` 已改为**轮询确认进程全部退出**（最长 30 秒，超时则 taskkill 整树）。日志出现 `All Trae processes exited.` 即表示锁已释放。
+
+**8. `status=unknown`：按钮文字点了但没变成"今日已签"**
+含义同第 5 条。注意 Trae 前端框架**不响应 DOM 合成事件**，脚本已在 3.3 改用 CDP `Input.dispatchMouseEvent` 派发真实鼠标事件（trusted），并在点击后**轮询验证最长 10 秒**（签到是网络请求，固定等待会误判）。若仍为 `unknown`，多为接口失败/未登录，需人工到 Trae 中确认。
+
+**9. `run-once.bat` / 带端口重启后报"未找到每日签到按钮"**
 刚重启的 Trae 主窗口可能还没渲染完成，或 CDP 连到了启动页/后台页。脚本已增强：连接时会逐个探测并优先选择"已渲染出左下角头像"的页面（即主窗口），随后等待主窗口 DOM 就绪（最长约 15 秒）。若仍失败，请查看日志中的 `CDP page:` 诊断行与报错里的页面标题/内容，确认连到的确实是主窗口。
 
 ## 一、需求与想法
@@ -252,6 +261,8 @@ scheduled-run.bat
 
 > `scheduled-run.bat` 调用 `auto-checkin.mjs` 完成签到；如配置了飞书 webhook（`config.json` 的 `feishuWebhook` 或环境变量 `TRAECHECKIN_FEISHU_WEBHOOK`），计划任务每次签到结束后会自动把结果（状态/详情/时间）推送到指定飞书群。`run-once.bat` 以 `--no-push` 运行，仅测试、不推送。webhook 不再硬编码在 `.bat` 中。
 
+> **运行日志**：任务计划会丢弃 stdout，`scheduled-run.bat` 因此会把自身输出**追加**到 `logs\checkin.log`（含开始时间、全过程输出与退出码）。定时任务失败时先看这里；该文件已被 `.gitignore` 忽略。
+
 **方式二：手动配置**
 
 1. 打开"任务计划程序" → 创建基本任务，每天固定时间触发。
@@ -366,11 +377,15 @@ trae-daily-checkin/
 ├── scheduled-run.bat             # 非交互版一键签到：供 Windows 任务计划调用（无 pause，避免挂起）
 ├── install-schedule.bat          # 一键注册"每日自动签到"任务计划（指向 scheduled-run.bat）
 ├── uninstall-schedule.bat        # 删除"每日自动签到"任务计划
+├── logs/                         # 定时运行日志（scheduled-run.bat 自动追加，已被 .gitignore 忽略）
+│   └── checkin.log
 ├── scripts/
 │   ├── locate-trae.ps1           # 通用定位 Trae 路径（进程/注册表/常见目录，可单独调用）
-│   └── relaunch-with-debug.ps1   # 强制重启 Trae 并开放端口（复用 locate-trae.ps1 定位）
+│   ├── relaunch-with-debug.ps1   # 强制重启 Trae 并开放端口（复用 locate-trae.ps1 定位）
+│   ├── close-trae.ps1            # 关闭 Trae 与 agent-tool-host，并轮询确认进程全部退出（释放单实例锁）
+│   └── wait-debug-port.ps1       # 轮询等待 CDP 调试端口就绪（/json/version 返回 200）
 └── src/
-    └── auto-checkin.mjs          # 自动签到主脚本（Node 版路径定位：自定义/自动扫描）
+    └── auto-checkin.mjs          # 自动签到主脚本（Node 版路径定位、CDP 连接、真实鼠标点击签到）
 ```
 
 ## 十一、后续可扩展

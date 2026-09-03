@@ -13,7 +13,22 @@ set "PROJECT_DIR=%~dp0"
 set "PORT=9222"
 if not "%TRAECHECKIN_PORT%"=="" set "PORT=%TRAECHECKIN_PORT%"
 
-rem 0) Resolve node absolute path (scheduler env may lack node in PATH)
+rem 0a) Self-relaunch with output appended to logs\checkin.log.
+rem     Task Scheduler discards stdout, so without this a failing run leaves
+rem     no trace at all. Guarded by an env flag to relaunch only once.
+set "LOG_DIR=%PROJECT_DIR%logs"
+if not exist "%LOG_DIR%" mkdir "%LOG_DIR%"
+set "LOG_FILE=%LOG_DIR%\checkin.log"
+if not "%TRAECHECKIN_LOGGING%"=="" goto :main
+set "TRAECHECKIN_LOGGING=1"
+echo ===== Run at %DATE% %TIME% =====>> "%LOG_FILE%"
+call "%~f0" %* >> "%LOG_FILE%" 2>&1
+set "RUN_EXIT=%errorlevel%"
+echo ===== Exit code: %RUN_EXIT% =====>> "%LOG_FILE%"
+exit /b %RUN_EXIT%
+:main
+
+rem 0b) Resolve node absolute path (scheduler env may lack node in PATH)
 set "NODE_EXE=node"
 for /f "delims=" %%i in ('where node 2^>nul') do (
   set "NODE_EXE=%%i"
@@ -26,9 +41,15 @@ if "%NODE_EXE%"=="node" (
 )
 
 rem 1) Close Trae and its background host processes
+rem    Use -File with a .ps1 instead of inline -Command: the latter fails with
+rem    "Input redirection is not supported" when stdout is redirected (scheduler),
+rem    which silently skipped this step and caused the singleton-lock race.
 echo [INFO] Closing Trae ...
-powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -like '*TRAE SOLO CN*' -or $_.Name -eq 'agent-tool-host.exe' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
-timeout /t 3 >nul
+powershell -NoProfile -ExecutionPolicy Bypass -File "%PROJECT_DIR%scripts\close-trae.ps1"
+rem Give Windows a moment to release the Electron singleton lock before relaunch.
+rem `timeout /t` cannot be used here: it needs stdin and aborts with
+rem "Input redirection is not supported" whenever stdout is redirected.
+powershell -NoProfile -Command "Start-Sleep -Seconds 3"
 
 rem 2) Locate and launch Trae with debug port (Trae already closed)
 if "%TRAECHECKIN_EXE%"=="" (
@@ -41,9 +62,11 @@ if "%TRAECHECKIN_EXE%"=="" (
 echo [INFO] Using Trae: "%TRAECHECKIN_EXE%"
 start "" "%TRAECHECKIN_EXE%" --remote-debugging-port=%PORT%
 
-rem 3) Wait for the debug port (up to ~20s)
+rem 3) Wait for the debug port (up to ~40s)
+rem    Note: port ready only means the CDP endpoint answers; the workbench page
+rem    may not exist yet, so auto-checkin.mjs keeps waiting for the page target.
 echo [INFO] Waiting for debug port %PORT% ...
-powershell -NoProfile -Command "$ok=$false; for($i=0;$i -lt 40;$i++){ try { $r=Invoke-WebRequest -Uri 'http://127.0.0.1:%PORT%/json/version' -TimeoutSec 1 -UseBasicParsing; if($r.StatusCode -eq 200){$ok=$true; break} } catch {} ; Start-Sleep -Milliseconds 500 }; if($ok){Write-Host '[OK] Port ready'} else {Write-Host '[ERROR] Port timeout, ensure Trae fully started'; exit 1 }"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%PROJECT_DIR%scripts\wait-debug-port.ps1" -Port %PORT% -TimeoutSec 40
 if errorlevel 1 (
   echo [ERROR] Debug port not available. Aborting check-in.
   exit /b 1
