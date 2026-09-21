@@ -51,7 +51,10 @@ rem `timeout /t` cannot be used here: it needs stdin and aborts with
 rem "Input redirection is not supported" whenever stdout is redirected.
 powershell -NoProfile -Command "Start-Sleep -Seconds 3"
 
-rem 2) Locate and launch Trae with debug port (Trae already closed)
+rem 2) Locate and launch Trae with debug port (Trae already closed).
+rem    Retry loop: since Trae 1.107.1, in unattended (scheduler/locked-screen)
+rem    sessions the main process can exit right after binding the debug port.
+rem    close + relaunch fixes that; try up to 3 attempts before failing.
 if "%TRAECHECKIN_EXE%"=="" (
   for /f "delims=" %%i in ('powershell -NoProfile -ExecutionPolicy Bypass -File "%PROJECT_DIR%scripts\locate-trae.ps1" 2^>nul') do set "TRAECHECKIN_EXE=%%i"
 )
@@ -60,6 +63,15 @@ if "%TRAECHECKIN_EXE%"=="" (
   exit /b 1
 )
 echo [INFO] Using Trae: "%TRAECHECKIN_EXE%"
+
+set ATTEMPT=0
+:launch_retry
+set /a ATTEMPT+=1
+if %ATTEMPT% GTR 3 (
+  echo [ERROR] Debug port never became ready after 3 attempts. Aborting check-in.
+  exit /b 1
+)
+echo [INFO] Launch attempt %ATTEMPT%/3 ...
 start "" "%TRAECHECKIN_EXE%" --remote-debugging-port=%PORT%
 
 rem 3) Wait for the debug port (up to ~40s)
@@ -68,12 +80,16 @@ rem    may not exist yet, so auto-checkin.mjs keeps waiting for the page target.
 echo [INFO] Waiting for debug port %PORT% ...
 powershell -NoProfile -ExecutionPolicy Bypass -File "%PROJECT_DIR%scripts\wait-debug-port.ps1" -Port %PORT% -TimeoutSec 40
 if errorlevel 1 (
-  echo [ERROR] Debug port not available. Aborting check-in.
-  exit /b 1
+  echo [WARN] Debug port not ready on attempt %ATTEMPT%. Closing and retrying ...
+  powershell -NoProfile -ExecutionPolicy Bypass -File "%PROJECT_DIR%scripts\close-trae.ps1"
+  powershell -NoProfile -Command "Start-Sleep -Seconds 5"
+  goto launch_retry
 )
 
-rem 4) Run check-in (port is open, no --force needed).
+rem 4) Run check-in. --force makes auto-checkin.mjs self-heal when Trae is
+rem    running but its debug port dropped (unattended start flakiness):
+rem    it closes and relaunches Trae instead of aborting.
 rem    --close makes the script auto-close Trae (incl. agent-tool-host) after check-in.
 echo [INFO] Running check-in ...
-"%NODE_EXE%" "%PROJECT_DIR%src\auto-checkin.mjs" --close
+"%NODE_EXE%" "%PROJECT_DIR%src\auto-checkin.mjs" --close --force
 exit /b %errorlevel%

@@ -266,11 +266,25 @@ async function ensureDebugPort() {
     return;
   }
 
-  // 1.3 正在运行但没有调试端口：默认安全退出，可选强制重启
+  // 1.3 正在运行但没有调试端口
+  // 无人值守会话（定时任务/锁屏）下新版 Trae 启动偶发不稳定：主进程可能
+  // 短暂开放端口后退出、再由自愈机制拉起。先探测一段恢复窗口，端口回来
+  // 即可直接继续，避免误报；窗口内没有恢复的，按配置强制重启或安全退出。
   if (running) {
+    const recoveryDeadline = Date.now() + 20_000;
+    console.log('[INFO] Trae 在运行但调试端口未开放，观察其恢复窗口（20s）...');
+    while (Date.now() < recoveryDeadline) {
+      await sleep(2_000);
+      if (await isPortOpen()) {
+        console.log('[OK] 调试端口在恢复窗口内开放');
+        return;
+      }
+    }
+
     if (FORCE_RELAUNCH) {
       console.log('[WARN] 强制重启 Trae 以开放调试端口（可能丢失未保存内容）...');
       await closeTrae();
+      await sleep(3_000); // 等 Electron 单实例锁完全释放，避免新实例把端口参数交给旧进程
       launchTraeWithDebug();
       await waitForPort(30_000);
       return;
