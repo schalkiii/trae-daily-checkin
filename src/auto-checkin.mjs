@@ -650,24 +650,27 @@ async function performCheckIn(cdp) {
     return { status: 'already_signed', detail: state.buttonText };
   }
 
-  // 3.3 点击签到按钮（真实鼠标事件，见 clickCheckinButton 说明）
-  console.log('[INFO] 尝试点击签到按钮...');
-  const clicked = await clickCheckinButton(cdp);
-
-  if (!clicked) {
-    return { status: 'click_failed' };
-  }
-
-  // 3.4 验证：轮询等待按钮文字变成"今日已签"。
-  //     签到是网络请求，耗时不定，固定等待会误判为 unknown。
+  // 3.3 点击签到按钮（真实鼠标事件，见 clickCheckinButton 说明）。
+  //     偶发情况下点击可能未真正触发，最多重试 2 次提升健壮性。
   let afterText = '';
-  for (let i = 0; i < 20; i++) {
-    await sleep(500);
-    const verify = await evaluate(`window.__TRAEFIND.checkinText() || 'button_gone'`);
-    afterText = verify.result.result.value;
-    if (/已签/.test(afterText)) {
-      return { status: 'success', detail: afterText };
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    console.log(`[INFO] 尝试点击签到按钮 (第 ${attempt} 次)...`);
+    const clicked = await clickCheckinButton(cdp);
+    if (!clicked) {
+      return { status: 'click_failed' };
     }
+
+    // 3.4 验证：轮询等待按钮文字变成"今日已签"。
+    //     签到是网络请求，耗时不定，固定等待会误判为 unknown。
+    for (let i = 0; i < 20; i++) {
+      await sleep(500);
+      const verify = await evaluate(`window.__TRAEFIND.checkinText() || 'button_gone'`);
+      afterText = verify.result.result.value;
+      if (/已签/.test(afterText)) {
+        return { status: 'success', detail: afterText };
+      }
+    }
+    console.warn(`[WARN] 第 ${attempt} 次点击后按钮未变为已签（当前：${afterText}），准备重试`);
   }
   return { status: 'unknown', detail: afterText };
 }
