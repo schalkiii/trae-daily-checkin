@@ -583,10 +583,12 @@ async function performCheckIn(cdp) {
   const { evaluate } = cdp;
   await injectDomHelpers(cdp); // 确保多候选定位辅助已注入（抗类名变化）
 
-  // 3.0 等待主窗口 DOM 就绪：Trae 刚带端口重启时界面可能仍在加载，
-  //     左下角头像（accountTrigger）出现后才说明主界面已渲染完成
+  // 3.0 等待主窗口 DOM 就绪：Trae 刚带端口重启时界面可能仍在加载。
+  //     账户组件为异步初始化（2026-09-26 实测：启动初期左下角显示"登录"
+  //     占位，登录态恢复后才渲染出 accountTrigger 头像，可达十几秒），
+  //     因此以头像出现为就绪标志，等待窗口需覆盖整个恢复过程
   let triggerReady = false;
-  for (let i = 0; i < 30; i++) {
+  for (let i = 0; i < 60; i++) {
     const probe = await evaluate(`!!window.__TRAEFIND.trigger()`);
     if (probe.result.result.value) { triggerReady = true; break; }
     await sleep(500);
@@ -619,16 +621,31 @@ async function performCheckIn(cdp) {
     console.log('[INFO] 账户菜单已经打开');
   }
 
-  // 3.2 读取签到按钮当前状态
-  const inspect = await evaluate(`(() => {
+  // 3.2 轮询等待签到卡片渲染后再读取状态。
+  //     签到卡片由账户/积分数据异步驱动渲染（2026-09-26 定时任务实测：
+  //     菜单先渲染出 UID 与管理项，签到卡片滞后数秒才插入 DOM），
+  //     打开菜单后只读一次会误判为按钮不存在；
+  //     等待期间菜单若因失焦自动收起，则重新点击头像展开
+  const readCheckinState = `(() => {
     const btn = window.__TRAEFIND.checkinButton();
     if (!btn) return { error: 'checkin_button_not_found' };
     return {
       buttonText: window.__TRAEFIND.checkinText(),
       title: window.__TRAEFIND.checkinTitle()
     };
-  })()`);
-  const state = inspect.result.result.value;
+  })()`;
+  const checkinDeadline = Date.now() + 30_000;
+  let state = (await evaluate(readCheckinState)).result.result.value;
+  while (state?.error && Date.now() < checkinDeadline) {
+    await sleep(1000);
+    const open = await evaluate(`!!window.__TRAEFIND.menu()`);
+    if (!open.result.result.value) {
+      console.log('[INFO] 账户菜单已收起，重新展开...');
+      await evaluate(`window.__TRAEFIND.trigger() && window.__TRAEFIND.trigger().click()`);
+      await sleep(1000);
+    }
+    state = (await evaluate(readCheckinState)).result.result.value;
+  }
   console.log(`[INFO] 签到按钮状态: ${JSON.stringify(state)}`);
   // 自检：报告命中策略，便于判断是类名前缀变化还是文本兜底生效
   const strat = await evaluate(`window.__TRAEFIND.checkinStrategy()`);
@@ -646,7 +663,8 @@ async function performCheckIn(cdp) {
       const t = window.__TRAEFIND.menuText();
       return {
         menuOpen: !!menu,
-        hasLogin: /登录|扫码|立即登录|手机号/.test(t),
+        // "退出登录"含"登录"字样，先剔除再判定，避免已登录被误判为未登录
+        hasLogin: /登录|扫码|手机号/.test(t.replace(/退出登录/g, '')),
         sample: t.replace(/\\s+/g, ' ').slice(0, 120),
         html: window.__TRAEFIND.menuHtml()
       };
