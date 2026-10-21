@@ -43,7 +43,7 @@ foreach ($r in $roots) {
       try {
         $v = Get-ItemProperty $child.PSPath -ErrorAction SilentlyContinue
         if ($v.DisplayName -like '*Trae*' -and $v.InstallLocation) {
-          foreach ($n in @('TRAE SOLO CN.exe', 'Trae.exe', 'TRAE.exe')) {
+          foreach ($n in @('Trae CN.exe', 'TRAE SOLO CN.exe', 'Trae.exe', 'TRAE.exe')) {
             $candidate = Join-Path $v.InstallLocation $n
             if (Test-Path -LiteralPath $candidate) {
               Write-Output $candidate
@@ -66,7 +66,7 @@ $bases = @(
 foreach ($base in $bases) {
   if (-not (Test-Path -LiteralPath $base)) { continue }
   $found = Get-ChildItem -LiteralPath $base -Recurse -Depth 3 -Filter '*.exe' -ErrorAction SilentlyContinue |
-    Where-Object { $_.Name -match '^TRAE( SOLO CN)?\.exe$' } |
+    Where-Object { $_.Name -match '^(Trae CN|TRAE SOLO CN|Trae|TRAE)\.exe$' } |
     Select-Object -First 1
   if ($found) {
     Write-Output $found.FullName

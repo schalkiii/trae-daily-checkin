@@ -256,46 +256,61 @@ async function ensureDebugPort() {
     return;
   }
 
-  const running = await isTraeRunning();
-
-  // 1.2 没有运行，直接启动并带调试端口
-  if (!running) {
-    console.log('[INFO] Trae 未运行，正在启动并开放调试端口...');
-    launchTraeWithDebug();
-    await waitForPort(30_000);
-    return;
+  // 1.2 没有运行：启动并等待端口（带重试，见 launchAndWaitPort）
+  if (!(await isTraeRunning())) {
+    return launchAndWaitPort();
   }
 
   // 1.3 正在运行但没有调试端口
   // 无人值守会话（定时任务/锁屏）下新版 Trae 启动偶发不稳定：主进程可能
   // 短暂开放端口后退出、再由自愈机制拉起。先探测一段恢复窗口，端口回来
   // 即可直接继续，避免误报；窗口内没有恢复的，按配置强制重启或安全退出。
-  if (running) {
-    const recoveryDeadline = Date.now() + 20_000;
-    console.log('[INFO] Trae 在运行但调试端口未开放，观察其恢复窗口（20s）...');
-    while (Date.now() < recoveryDeadline) {
-      await sleep(2_000);
-      if (await isPortOpen()) {
-        console.log('[OK] 调试端口在恢复窗口内开放');
-        return;
-      }
-    }
-
-    if (FORCE_RELAUNCH) {
-      console.log('[WARN] 强制重启 Trae 以开放调试端口（可能丢失未保存内容）...');
-      await closeTrae();
-      await sleep(3_000); // 等 Electron 单实例锁完全释放，避免新实例把端口参数交给旧进程
-      launchTraeWithDebug();
-      await waitForPort(30_000);
+  const recoveryDeadline = Date.now() + 20_000;
+  console.log('[INFO] Trae 在运行但调试端口未开放，观察其恢复窗口（20s）...');
+  while (Date.now() < recoveryDeadline) {
+    await sleep(2_000);
+    if (await isPortOpen()) {
+      console.log('[OK] 调试端口在恢复窗口内开放');
       return;
     }
-    throw new Error(
-      `Trae 正在运行，但未开启调试端口。\n` +
-      `请先关闭 Trae，然后运行：\n` +
-      `  "${TRAE_EXE}" ${debugLaunchArgs()}\n` +
-      `或加 --force 参数让脚本自动重启：node src/auto-checkin.mjs --force`
-    );
   }
+
+  if (FORCE_RELAUNCH) {
+    console.log('[WARN] 强制重启 Trae 以开放调试端口（可能丢失未保存内容）...');
+    return launchAndWaitPort({ closeFirst: true });
+  }
+  throw new Error(
+    `Trae 正在运行，但未开启调试端口。\n` +
+    `请先关闭 Trae，然后运行：\n` +
+    `  "${TRAE_EXE}" ${debugLaunchArgs()}\n` +
+    `或加 --force 参数让脚本自动重启：node src/auto-checkin.mjs --force`
+  );
+}
+
+// 启动 Trae 并等待调试端口就绪，失败自动重试。
+// 背景：无人值守会话下 Trae 主进程可能绑定调试端口后随即退出（1.107.1 起已知
+// 问题），或新进程把端口参数交给仍持有单实例锁的残留进程后自己退出——固定
+// "单次启动 + 30s 等待"会把这类抖动直接判死（2026-10-21 定时任务即败于此）。
+// 策略：
+//   - 第 1 次按调用方指示决定是否先清场；
+//   - 第 2 次起先 closeTrae 清掉残留进程，等 3s 单实例锁释放后再启动；
+//   - 每次最长等 30s，共 attempts 次，全部失败才抛出。
+async function launchAndWaitPort({ closeFirst = false, attempts = 3 } = {}) {
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    if (closeFirst || attempt > 1) {
+      await closeTrae();
+      await sleep(3_000); // 等 Electron 单实例锁完全释放，避免新实例把端口参数交给旧进程
+    }
+    console.log(`[INFO] 启动 Trae 并开放调试端口（第 ${attempt}/${attempts} 次）...`);
+    launchTraeWithDebug();
+    try {
+      await waitForPort(30_000);
+      return;
+    } catch {
+      console.log(`[WARN] 第 ${attempt}/${attempts} 次启动后调试端口 30s 内未就绪`);
+    }
+  }
+  throw new Error(`等待调试端口超时（已重试 ${attempts} 次）`);
 }
 
 async function isPortOpen() {
@@ -308,7 +323,11 @@ async function isPortOpen() {
 }
 
 async function isTraeRunning() {
-  const cmd = `Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -like '*TRAE SOLO CN*' } | Select-Object ProcessId`;
+  // 覆盖本机可能安装的各版本主进程名（Trae CN / TRAE SOLO CN / 国际版 Trae）。
+  // 只匹配 ExecutablePath '*TRAE SOLO CN*' 会把正在运行的 Trae CN 误判为
+  // "未运行"，重启分支随即启动新实例——而新实例被单实例锁吞掉、端口永远
+  // 不开放（2026-10-21 定时任务失败即源于此误判）。
+  const cmd = `Get-CimInstance Win32_Process | Where-Object { $_.Name -match '^(Trae CN|TRAE SOLO CN|Trae|TRAE)\\.exe$' } | Select-Object ProcessId`;
   return new Promise((resolve, reject) => {
     const p = spawn('powershell', ['-NoProfile', '-NonInteractive', '-Command', cmd]);
     let out = '';
@@ -329,7 +348,10 @@ function launchTraeWithDebug() {
 }
 
 async function closeTrae() {
-  const cmd = `Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -like '*TRAE SOLO CN*' -or $_.Name -eq 'agent-tool-host.exe' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`;
+  // 与 scripts/close-trae.ps1 保持同一匹配集：各版本主进程 + agent-tool-host。
+  // 漏掉 Trae CN 残留进程会导致单实例锁不释放，随后的启动把端口参数交给旧
+  // 进程后自己退出（"端口就绪却连不上"的根因）。
+  const cmd = `Get-CimInstance Win32_Process | Where-Object { $_.Name -match '^(Trae CN|TRAE SOLO CN|Trae|TRAE)\\.exe$' -or $_.Name -eq 'agent-tool-host.exe' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`;
   return new Promise((resolve, reject) => {
     const p = spawn('powershell', ['-NoProfile', '-NonInteractive', '-Command', cmd]);
     p.on('close', () => resolve());
@@ -710,6 +732,7 @@ async function performCheckIn(cdp) {
 // -------------------------------------------------------------
 // 3.5 飞书群机器人 webhook 推送（可选）
 //     配置方式：--feishu <url> 或环境变量 TRAECHECKIN_FEISHU_WEBHOOK
+//     无论签到成功 / 已签 / 失败（含启动阶段抛错）都会推送；
 //     推送失败仅告警，不影响签到退出码
 // -------------------------------------------------------------
 async function notifyFeishu(result) {
@@ -722,6 +745,7 @@ async function notifyFeishu(result) {
     not_logged_in: '账户未登录',
     click_failed: '点击按钮失败',
     unknown: '结果未知',
+    error: '运行错误',
   };
   const text = [
     '【Trae 每日签到】',
@@ -772,35 +796,42 @@ async function notifyFeishu(result) {
 // 4. 主流程
 // -------------------------------------------------------------
 async function main() {
+  let result;
   try {
     await ensureDebugPort();
     console.log('[INFO] 连接 CDP...');
     const cdp = await connectCDP();
-    const result = await performCheckIn(cdp);
-    cdp.ws.close();
-    await sleep(300); // 等 WebSocket 句柄释放后再退出
-
-    console.log('[RESULT]', JSON.stringify(result, null, 2));
-
-    // 签到结果推送到飞书（可选，配置了 webhook 才发送）
-    await notifyFeishu(result);
-
-    // 签到完成（无论成功/已签/失败）后，可选关闭 Trae 进程
-    if (CLOSE_AFTER_CHECKIN) {
-      console.log('[INFO] --close 已指定，正在关闭 Trae...');
-      await closeTrae();
-      console.log('[INFO] Trae 已关闭');
-    }
-
-    if (result.status === 'success') {
-      process.exit(0);
-    } else if (result.status === 'already_signed') {
-      process.exit(2); // 已签也是一种"成功"，但用不同退出码方便调度
-    } else {
-      process.exit(1);
+    try {
+      result = await performCheckIn(cdp);
+    } finally {
+      cdp.ws.close();
+      await sleep(300); // 等 WebSocket 句柄释放后再退出
     }
   } catch (err) {
+    // 启动/连接阶段抛错：构造 error 结果，保证飞书推送覆盖每一种结局
+    // （旧代码在此直接 process.exit(1)，失败当天收不到任何通知）。
     console.error('[ERROR]', err.message);
+    result = { status: 'error', detail: err.message };
+  }
+
+  console.log('[RESULT]', JSON.stringify(result, null, 2));
+
+  // 签到结果推送到飞书（可选，配置了 webhook 才发送；成功/失败都推送）
+  await notifyFeishu(result);
+
+  // 签到完成（无论成功/已签/失败）后，可选关闭 Trae 进程。
+  // 失败时也关闭：避免遗留一个开着调试端口的 Trae 实例。
+  if (CLOSE_AFTER_CHECKIN) {
+    console.log('[INFO] --close 已指定，正在关闭 Trae...');
+    await closeTrae();
+    console.log('[INFO] Trae 已关闭');
+  }
+
+  if (result.status === 'success') {
+    process.exit(0);
+  } else if (result.status === 'already_signed') {
+    process.exit(2); // 已签也是一种"成功"，但用不同退出码方便调度
+  } else {
     process.exit(1);
   }
 }

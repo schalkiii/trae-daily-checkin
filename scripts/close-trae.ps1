@@ -5,10 +5,15 @@
 # 说明：以 -File 方式调用，而非 -Command 内联脚本。后者在输出被重定向
 #       或由任务计划调用时会触发 "Input redirection is not supported"，
 #       导致关闭步骤静默失败，进而引发 Electron 单实例锁竞态。
+# 匹配集覆盖本机可能安装的各版本主进程名（Trae CN / TRAE SOLO CN / 国际版
+# Trae）加 agent-tool-host；只匹配 '*TRAE SOLO CN*' 会漏掉 Trae CN 的残留
+# 进程，单实例锁不释放，随后启动会把端口参数交给旧进程后自己退出。
 
-$targets = Get-CimInstance Win32_Process | Where-Object {
-    $_.ExecutablePath -like '*TRAE SOLO CN*' -or $_.Name -eq 'agent-tool-host.exe'
+$match = {
+  $_.Name -match '^(Trae CN|TRAE SOLO CN|Trae|TRAE)\.exe$' -or $_.Name -eq 'agent-tool-host.exe'
 }
+
+$targets = Get-CimInstance Win32_Process | Where-Object $match
 
 if ($targets) {
     $targets | ForEach-Object {
@@ -25,9 +30,7 @@ if ($targets) {
 # leaving the port unbound (intermittent "port ready, then fetch failed").
 $deadline = (Get-Date).AddSeconds(30)
 while ((Get-Date) -lt $deadline) {
-    $remaining = Get-CimInstance Win32_Process | Where-Object {
-        $_.ExecutablePath -like '*TRAE SOLO CN*' -or $_.Name -eq 'agent-tool-host.exe'
-    }
+    $remaining = Get-CimInstance Win32_Process | Where-Object $match
     if (-not $remaining) {
         Write-Host '[INFO] All Trae processes exited.'
         exit 0
@@ -38,6 +41,8 @@ while ((Get-Date) -lt $deadline) {
 # Processes still alive: escalate with taskkill to reap the whole tree.
 Write-Host '[WARN] Trae processes still alive after 30s, forcing taskkill...'
 & taskkill /F /IM 'TRAE SOLO CN.exe' /T 2>$null | Out-Null
+& taskkill /F /IM 'Trae CN.exe' /T 2>$null | Out-Null
+& taskkill /F /IM 'Trae.exe' /T 2>$null | Out-Null
 & taskkill /F /IM 'agent-tool-host.exe' /T 2>$null | Out-Null
 Start-Sleep -Seconds 2
 

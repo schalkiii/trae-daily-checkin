@@ -43,6 +43,13 @@ PowerShell 把带引号的路径当成字符串而不是命令。两种修法：
 3. 另开终端运行（**不要** `--force`）：`node src/auto-checkin.mjs`
 > 计划任务现在改为调用 `scheduled-run.bat`（见 6.4）：它先彻底关闭 Trae → 带 `--remote-debugging-port` 重新启动 → 轮询端口就绪 → 再运行签到脚本，从根上绕开了 Electron 单实例锁竞态。无论首跑还是日常，都不再出现"等待调试端口超时"。`scheduled-run.bat` 传了 `--force` 作为**兜底**：仅在「Trae 在运行但调试端口意外丢失」时（新版 Trae 无人值守会话启动偶发不稳定）自动关闭并重启，正常场景不会触发，因此不会引入锁竞态。
 
+> **2026-10-21/22 补充：本机 Trae CN 连续多天"等待调试端口超时"的根因与加固**
+> 定时任务自 10-12 起多天失败，日志停在 `等待调试端口超时`（另一些天为 `Trae executable not found`）。根因是**进程匹配只认 SOLO 版**：`isTraeRunning()` 原先按 `ExecutablePath -like '*TRAE SOLO CN*'` 判断，把正在运行的 **Trae CN**（本机装的是 CN 版）误判为"未运行"，走进"启动新实例"分支——新实例被单实例锁吞掉、端口参数转交后自己退出，端口永远不开放；`locate-trae.ps1` 的注册表/目录扫描同样漏掉 `Trae CN.exe`，于是没在运行时又报找不到。
+> 修复与加固：
+> 1. `auto-checkin.mjs` / `close-trae.ps1` / `locate-trae.ps1` 三处统一匹配 `^(Trae CN|TRAE SOLO CN|Trae|TRAE)\.exe$`（+ `agent-tool-host.exe`）。
+> 2. 启动路径收敛为 `launchAndWaitPort()`：最多 3 次尝试，第 2 次起先 `closeTrae()` 清场并等待单实例锁释放（3 秒）再重启，每次最长等 30 秒，全部失败才抛错。
+> 3. `main()` 重构：启动/连接阶段抛错也会构造 `status=error` 结果并**推送飞书**（旧代码直接 `exit 1`，失败当天收不到任何通知）；`--close` 对失败路径同样生效，不再遗留开着调试端口的 Trae。
+
 **3. 计划任务运行时提示找不到 node / 签到没执行**
 计划任务在非交互环境可能没有 Node 的 PATH。`install-schedule.bat` 已改为解析 node 的**绝对路径**写入任务命令，避免该问题。若仍失败，请确认 Node 已安装且 `where node` 能找到。
 
@@ -56,7 +63,7 @@ PowerShell 把带引号的路径当成字符串而不是命令。两种修法：
 调试端口就绪（`/json/version` 返回 200）只代表 CDP 端点可用，**不代表 Trae 主窗口已创建**。刚启动时 `/json` 的 page 列表为空，直接查询就会报此错。脚本已修复为轮询等待主窗口 page 出现（最长 30 秒）。若仍失败，查看 `logs\checkin.log` 中的 `CDP page:` 诊断行。
 
 **7. 端口曾就绪但随后 `fetch failed`（Electron 单实例锁竞态）**
-关闭 Trae 后若进程尚未完全退出，Electron 的 SingletonLock 仍被占用，新实例会把 `--remote-debugging-port` 转交给已退出的旧实例后自身退出，导致无人绑定端口。`close-trae.ps1` 已改为**轮询确认进程全部退出**（最长 30 秒，超时则 taskkill 整树）。日志出现 `All Trae processes exited.` 即表示锁已释放。
+关闭 Trae 后若进程尚未完全退出，Electron 的 SingletonLock 仍被占用，新实例会把 `--remote-debugging-port` 转交给已退出的旧实例后自身退出，导致无人绑定端口。`close-trae.ps1` 已改为**轮询确认进程全部退出**（最长 30 秒，超时则 taskkill 整树）。日志出现 `All Trae processes exited.` 即表示锁已释放。进程匹配集已扩展为 `^(Trae CN|TRAE SOLO CN|Trae|TRAE)\.exe$` + `agent-tool-host.exe`，覆盖 CN 版残留（漏匹配会导致锁不释放，见第 2 条 2026-10-21/22 补充）。
 
 **8. `status=unknown`：按钮文字点了但没变成"今日已签"**
 含义同第 5 条。注意 Trae 前端框架**不响应 DOM 合成事件**，脚本已在 3.3 改用 CDP `Input.dispatchMouseEvent` 派发真实鼠标事件（trusted），并在点击后**轮询验证最长 10 秒**（签到是网络请求，固定等待会误判）。若仍为 `unknown`，多为接口失败/未登录，需人工到 Trae 中确认。
@@ -154,9 +161,11 @@ http://localhost:9222/json
 ```
 1. 确保 Trae 已开启调试端口
    ├─ 端口已开：直接连接
-   ├─ 未运行：自动启动 Trae（带调试端口）
+   ├─ 未运行：自动启动 Trae（带调试端口；失败自动重试，最多 3 次，
+   │   第 2 次起先清场残留进程并等待单实例锁释放再重启）
    └─ 已运行但无端口：先观察 20s 恢复窗口（无人值守启动时主进程可能
       短暂退出后自愈），仍未开放则安全报错，或加 --force 参数强制重启
+      （强制重启同样走带重试的启动路径）
 
 2. 连接 CDP，定位 workbench page
 
@@ -286,7 +295,7 @@ scheduled-run.bat
    - 环境变量：`setx TRAECHECKIN_FEISHU_WEBHOOK "https://open.feishu.cn/open-apis/bot/v2/hook/xxxx"`。
    - 命令行：`node src/auto-checkin.mjs --feishu "https://open.feishu.cn/open-apis/bot/v2/hook/xxxx"`。
    注意：`run-once.bat` 以 `--no-push` 运行（仅测试）；`scheduled-run.bat` 不传 `--no-push`，配置 webhook 后会自动推送。
-3. 每次签到结束后，脚本向 webhook 发送一条文本消息，内容包含：状态、详情、时间。
+3. 每次运行结束后——**无论签到成功、今日已签还是失败**（失败含启动/连接阶段抛错，如调试端口始终未就绪）——脚本都会向 webhook 发送一条文本消息，内容包含：状态、详情、时间。失败时状态为 `运行错误`（`status=error`），详情为具体报错文本。
 
 > 说明：推送失败只会在终端输出 `[WARN] 飞书通知发送失败`，**不影响签到本身的退出码**；未配置 webhook 时跳过推送。
 
@@ -307,6 +316,7 @@ scheduled-run.bat
 | `not_logged_in` | 账户未登录（弹窗里出现"登录/扫码"等入口），需要先手动登录 |
 | `click_failed` | 找到了按钮但点击失败 |
 | `unknown` | 点击后按钮文字未变成"今日已签"，需人工查看 |
+| `error` | 启动/连接阶段抛错（如调试端口超时、CDP 连接失败），详情见 `[RESULT]` 与飞书推送 |
 
 ## 八、验证结果
 
