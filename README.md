@@ -385,6 +385,7 @@ node src/auto-checkin.mjs --port 9223 --force --profile "C:\Windows\Temp\trae-te
 ```text
 trae-daily-checkin/
 ├── package.json                  # 项目元数据
+├── AGENTS.md                     # Agent 规则文件（定位/跑法/约定/当前状态，下次会话入口）
 ├── README.md                     # 本文件
 ├── launch-with-debug.bat         # 双击启动 Trae：先关闭已运行实例，再带调试端口启动（自动定位），并轮询确认端口就绪
 ├── run-once.bat                   # 一键签到：关闭 Trae 后带端口重启 -> 等待端口 -> 运行签到（手动双击用，含 pause）
