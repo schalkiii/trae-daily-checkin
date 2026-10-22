@@ -10,10 +10,16 @@
   - `scripts/close-trae.ps1`、`scripts/locate-trae.ps1`：同一匹配集（注册表候选与目录扫描补 `Trae CN.exe`，taskkill 兜底同步）。
 - **失败不推送飞书**：`main()` 在启动/连接阶段抛错时直接 `exit 1`，`notifyFeishu` 永不到达，失败当天无任何通知。现重构为：抛错也构造 `status=error` 结果，**成功/已签/失败一律推送**；`--close` 对失败路径同样生效（不再遗留带调试端口的 Trae）。
 - **端口恢复重试加固**：新增 `launchAndWaitPort()`（ensureDebugPort 的启动路径收敛于此）：最多 3 次尝试，第 2 次起先 `closeTrae()` 清场并等待单实例锁释放（3 秒）再重启，每次最长等 30 秒，全部失败才抛 `等待调试端口超时（已重试 3 次）`。
-- 实测（2026-10-22 01:2x）：Trae CN 运行中 + 不存在端口 → 正确走入"已运行但无端口"分支、20s 恢复窗口后报错、飞书收到 `运行错误` 推送、退出码 1，Trae 进程零惊动。
+- **无人值守签到报「等待 Trae 主窗口就绪超时」**（02:30 首跑暴露，进程匹配/端口类问题修复后失败点后移到账户组件）：2026-10-22 干净环境实测头像就绪全程约 36s（page target 38s 出现后再 35.7s 到头像），原 30s 窗口不够。
+  - `src/auto-checkin.mjs`：头像等待窗口 30s→120s，~60s 兜底 `Page.bringToFront`；page target 等待 30s→90s（端口就绪明显早于主窗口创建）。
+- **`launchTraeWithDebug` 启动路径从未成功过**：Node 向 `cmd /c` 传含引号的单字符串会被 libuv 转义弄坏（反斜杠被吞、路径损坏、启动静默失败）；一直靠 `scheduled-run.bat` 的 .bat 启动兜底。新增 `scripts/launch-trae-debug.bat`（ASCII+CRLF，参数 exe/端口/profile），`launchTraeWithDebug` 改 spawn 该 .bat。
 
 ### 变更
-- README：Troubleshooting 第 2 条补 2026-10-21/22 根因与加固说明、第 7 条同步匹配集；6.5 与退出码 status 表补 `error`（失败也推送）；核心流程图补启动重试描述。
+- README：Troubleshooting 第 2 条补 2026-10-21/22 根因与加固说明、第 7 条同步匹配集、第 11 条记录头像窗口案例与修复；6.5 与退出码 status 表补 `error`（失败也推送）；核心流程图补启动重试描述；文件树补 `launch-trae-debug.bat`。
+
+### 备注
+- 实测（2026-10-22 01:2x）：Trae CN 运行中 + 不存在端口 → 正确走入"已运行但无端口"分支、20s 恢复窗口后报错、飞书收到 `运行错误` 推送、退出码 1，Trae 进程零惊动。
+- 环境备注：agent 进程树的环境变量会令 Trae 启动器拒绝 `--remote-debugging-port`（bad option, exit 9）；计划任务/干净交互会话均正常。诊断请在干净环境（如 /IT 计划任务）中进行。
 
 ## [2026-09-26]
 

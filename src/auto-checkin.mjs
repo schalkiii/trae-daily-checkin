@@ -338,9 +338,13 @@ async function isTraeRunning() {
 }
 
 function launchTraeWithDebug() {
-  // 用 start 命令脱离当前进程，避免 Node 持有子进程句柄导致关闭时 UV 断言崩溃
-  const cmd = `start "" "${TRAE_EXE}" ${debugLaunchArgs()}`;
-  spawn('cmd', ['/c', cmd], {
+  // 必须经 .bat 文件启动：Node 直接 spawn('cmd', ['/c', 'start "" "exe" --flag'])
+  // 会被 libuv 的参数转义弄坏——含引号的单字符串传给 cmd /c 时反斜杠被吞、
+  // 路径损坏，启动静默失败（2026-10-22 实测，该路径从未成功过，一直靠
+  // scheduled-run.bat 的 .bat 启动兜底）。.bat 文件内容不走命令行包装，
+  // 与 scheduled-run.bat 机制完全一致（该机制已验证可用）。
+  const launcher = path.join(ROOT, 'scripts', 'launch-trae-debug.bat');
+  spawn('cmd', ['/c', launcher, TRAE_EXE, String(DEBUG_PORT), USER_DATA_DIR || ''], {
     detached: true,
     stdio: 'ignore',
     windowsHide: true,
@@ -510,7 +514,9 @@ async function connectCDP() {
   // Trae 刚带端口启动时，/json/version 已响应但主窗口 page 可能尚未创建，
   // 此时 /json 返回的 target 列表为空。定时任务属冷启动必现此竞态，
   // 因此轮询等待 page 出现，而非一次性查询后立即报错。
-  const PAGE_WAIT_MS = 30_000;
+  // page target 出现可能明显晚于端口就绪（2026-10-22 实测：启动到首个 page
+  // target 约 38s，而端口先开放）。90s 覆盖端口就绪后主窗口才创建的慢启动。
+  const PAGE_WAIT_MS = 90_000;
   const deadline = Date.now() + PAGE_WAIT_MS;
   let pages = [];
   let notified = false;
@@ -602,17 +608,23 @@ async function clickCheckinButton(cdp) {
 }
 
 async function performCheckIn(cdp) {
-  const { evaluate } = cdp;
+  const { evaluate, send } = cdp;
   await injectDomHelpers(cdp); // 确保多候选定位辅助已注入（抗类名变化）
 
   // 3.0 等待主窗口 DOM 就绪：Trae 刚带端口重启时界面可能仍在加载。
   //     账户组件为异步初始化（2026-09-26 实测：启动初期左下角显示"登录"
-  //     占位，登录态恢复后才渲染出 accountTrigger 头像，可达十几秒），
-  //     因此以头像出现为就绪标志，等待窗口需覆盖整个恢复过程
+  //     占位，登录态恢复后才渲染出 accountTrigger 头像，可达十几秒）。
+  //     2026-10-22 干净环境实测：头像就绪全程约 36s（page target 38s 出现后
+  //     再 35.7s 到头像）；02:30 无人值守会话 30s 窗口即因此超时失败。
+  //     窗口放宽到 120s 覆盖无人值守的更慢场景；~60s 时 bringToFront 一次
+  //     作为兜底（怀疑无人值守下组件就绪依赖窗口可见性）。
   let triggerReady = false;
-  for (let i = 0; i < 60; i++) {
+  for (let i = 0; i < 240; i++) {
     const probe = await evaluate(`!!window.__TRAEFIND.trigger()`);
     if (probe.result.result.value) { triggerReady = true; break; }
+    if (i === 120) { // ~60s：兜底把页面带到前台
+      try { await send('Page.bringToFront'); } catch { /* 忽略：仅兜底手段 */ }
+    }
     await sleep(500);
   }
   if (!triggerReady) {
